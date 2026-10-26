@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-// 箱 HAKO — このMacから箱に入れる・見る・済みにする道具。Claude Code のスキル（~/.claude/skills/hako）が使う。
+// 箱 HAKO — このMacから箱に入れる・見る・取り出す道具。Claude Code のスキル（~/.claude/skills/hako）が使う。
 // 鍵は .secrets/master.b64（コミットしない）から読み、画面には出さない。送るものはすべて封をしてから中継へ。
 //
-//   node ~/hako/scripts/hako.mjs add "やること" ["やること2" …] [--due 明日] [--note "…"] [--tag 仕事] [--url https://…] [--where 名前]
-//   node ~/hako/scripts/hako.mjs add --json -      … 標準入力から [{"title","due","note","tags","url"}]（Claude が文脈から決めた形）
-//   node ~/hako/scripts/hako.mjs list [--done] [--tags] [--json]
-//   node ~/hako/scripts/hako.mjs done|reopen|delete <番号 か 題名の一部>
-//   node ~/hako/scripts/hako.mjs edit <番号 か 題名の一部> [--title …] [--due …] [--note …] [--tag …] [--url …]
-//   node ~/hako/scripts/hako.mjs today             … 今日の日付（朝7時区切り）
+//   node ~/hako/scripts/hako.mjs add "入れるもの" ["2つ目" …] [--note "…"] [--url https://…] [--where 名前]
+//   node ~/hako/scripts/hako.mjs add --json -      … 標準入力から [{"title","note","url"}]（Claude が文脈から決めた形）
+//   node ~/hako/scripts/hako.mjs list [--done] [--json]   … 箱の中（新しく入れた順）/ 取り出したもの
+//   node ~/hako/scripts/hako.mjs done <番号 か 題名の一部>    … 取り出す
+//   node ~/hako/scripts/hako.mjs reopen|delete <…>        … 箱に戻す / 消す
+//   node ~/hako/scripts/hako.mjs edit <…> [--title …] [--note …] [--url …]
 
 import { readFile, writeFile, readdir, rename, unlink, mkdir } from 'node:fs/promises';
 import { basename } from 'node:path';
@@ -20,7 +20,8 @@ import * as L from '../logic.js';
 const ROOT = new URL('..', import.meta.url);
 const SITE = process.env.HAKO_SITE || 'https://sho3690.github.io/hako/';
 const SENT_DIR = new URL('.secrets/sent/', ROOT);   // 送ったものの控え（1件1ファイル。同時に動いても上書きし合わない）
-const VALUE_OPTS = new Set(['due', 'note', 'tag', 'tags', 'url', 'where', 'title', 'json']);
+const VALUE_OPTS = new Set(['note', 'url', 'where', 'title', 'json']);
+const FLAG_OPTS = new Set(['done', 'json']);
 
 class Stop extends Error {}
 const stop = msg => { throw new Stop(msg); };
@@ -32,8 +33,11 @@ function parseArgs(argv) {
     const a = rest[i];
     if (!a.startsWith('--')) { pos.push(a); continue; }
     const [k, inline] = a.slice(2).split(/=(.*)/s);
-    const takesValue = VALUE_OPTS.has(k) && cmd !== 'list';   // list の --json / --tags / --done は印だけ
-    if (!takesValue) { opt[k] = true; continue; }
+    const takesValue = VALUE_OPTS.has(k) && cmd !== 'list';   // list の --json / --done は印だけ
+    if (!takesValue) {
+      if (!FLAG_OPTS.has(k)) stop(`知らない指定です: --${k}（日付やタグは持たないので、必要なら中身の文に書いてください）`);
+      opt[k] = true; continue;
+    }
     const v = inline ?? rest[++i];
     if (v === undefined) stop(`--${k} のあとに値がありません`);
     opt[k] = v;
@@ -163,13 +167,10 @@ function shortIds(tasks) {
   }
   return out;
 }
-function line(t, today, short) {
-  const bits = [];
-  if (t.due) bits.push(L.dueLabel(t.due, today) === L.mdw(t.due) ? L.mdw(t.due) : `${L.dueLabel(t.due, today)} ${L.mdw(t.due)}`);
-  const late = t.status === 'open' ? L.overdueDays(t.due, today) : 0;
-  if (late) bits.push(`${late}日過ぎ`);
+function line(t, short) {
   const src = L.sourceLabel(t.from);
-  return `  [${short}] ${t.title}${bits.length ? `（${bits.join('・')}）` : ''}${t.tags.map(g => ` #${g}`).join('')}${src ? `  — ${src}` : ''}`;
+  const link = t.url && L.shortUrl(t.url) !== t.title ? ` ${L.shortUrl(t.url)}` : '';
+  return `  [${short}] ${t.title}${t.note ? '（メモあり）' : ''}${link}${src ? `  — ${src}` : ''}`;
 }
 function resolve(state, ref, status) {
   const r = String(ref ?? '').trim().replace(/^\[|\]$/g, '').replace(/^#/, '');
@@ -180,14 +181,9 @@ function resolve(state, ref, status) {
   if (hits.length === 1) return hits[0];
   if (!hits.length) stop(`「${r}」に当たるものが箱にありません`);
   const sid = shortIds(state.tasks);
-  stop(`「${r}」に当たるものが${hits.length}件あります。番号で指定してください:\n${hits.slice(0, 10).map(t => line(t, L.jstToday(), sid.get(t.id))).join('\n')}`);
+  stop(`「${r}」に当たるものが${hits.length}件あります。番号で指定してください:\n${hits.slice(0, 10).map(t => line(t, sid.get(t.id))).join('\n')}`);
 }
 const ev = (t, payload) => ({ id: randomUUID(), t, at: Date.now(), ...payload });
-function dueOpt(v, today) {
-  const d = L.resolveWhen(v, today);
-  if (d === null) stop(`日付の言葉「${v}」が読めません（例: 今日・明日・金曜・来週・月末・10/30・2026-10-30・なし）`);
-  return d;
-}
 async function readStdin() {
   const chunks = [];
   for await (const c of process.stdin) chunks.push(c);
@@ -197,9 +193,6 @@ async function readStdin() {
 // ---- コマンド ----
 async function main() {
   const { cmd, pos, opt } = parseArgs(process.argv.slice(2));
-  const today = L.jstToday();
-
-  if (cmd === 'today') { console.log(`${today}（${L.DOW_JA[L.dow(today)]}）※朝7時区切り`); return; }
   if (cmd === 'help' || cmd === '--help') { console.log((await readFile(new URL(import.meta.url), 'utf8')).split('\n').slice(1, 10).map(l => l.replace(/^\/\/ ?/, '')).join('\n')); return; }
 
   const ctx = await loadKeys();
@@ -209,24 +202,18 @@ async function main() {
     if (opt.json != null) {
       let parsed;
       try { parsed = JSON.parse(opt.json === '-' ? await readStdin() : opt.json); } catch { stop('--json の中身が JSON として読めません'); }
-      items = (Array.isArray(parsed) ? parsed : [parsed]).map(x => (typeof x === 'string' ? L.parseLine(x, today) : { ...x, due: x?.due ? dueOpt(x.due, today) : '' }));
-    } else items = pos.flatMap(p => L.parseInput(p, today));
+      items = (Array.isArray(parsed) ? parsed : [parsed]).map(x => (typeof x === 'string' ? L.parseLine(x) : x));
+    } else items = pos.flatMap(p => L.parseInput(p));
     const cwd = process.cwd();
     const where = opt.where ?? (cwd === homedir() ? '' : basename(cwd));
-    const common = {};
-    if (opt.due != null) common.due = dueOpt(opt.due, today);
-    if (opt.note != null) common.note = opt.note;
-    if (opt.tag != null || opt.tags != null) common.tags = String(opt.tag ?? opt.tags);
-    if (opt.url != null) common.url = opt.url;
-    const tasks = items.map(x => {
-      const merged = { ...x, ...Object.fromEntries(Object.entries(common).filter(([k]) => k !== 'tags' && !(k === 'due' && x.due))) };
-      if (common.tags) merged.tags = [...L.sanitizeTags(x.tags), ...L.sanitizeTags(common.tags)];
-      return { id: randomUUID(), ...L.sanitizeTask({ ...merged, from: { via: 'claude', where, device: 'Mac' } }) };
-    }).filter(t => t.title);
-    if (!tasks.length) stop('入れるものがありません（やることの文を渡してください）');
+    const tasks = items.map(x => ({ id: randomUUID(), ...L.sanitizeTask({
+      ...x, ...(opt.note != null ? { note: opt.note } : {}), ...(opt.url != null && !x?.url ? { url: opt.url } : {}),
+      from: { via: 'claude', where, device: 'Mac' },
+    }) })).filter(t => t.title);
+    if (!tasks.length) stop('入れるものがありません（中身の文を渡してください）');
     await send(ctx, tasks.map(task => ev('task.add', { task })));
     console.log(`「箱」に入れました（${tasks.length}件）`);
-    for (const t of tasks) console.log(`・${t.title}${t.due ? `（${L.dueLabel(t.due, today)}${L.dueLabel(t.due, today) === L.mdw(t.due) ? '' : ` ${L.mdw(t.due)}`}）` : ''}${t.tags.map(g => ` #${g}`).join('')}`);
+    for (const t of tasks) console.log(`・${t.title}`);
     console.log(`画面: ${SITE}`);
     const sent = await loadSent();
     if (sent.some(s => Date.now() - s.at > 1800000)) {   // 前に届かなかったもの・古いものがあるときだけ確かめる
@@ -239,38 +226,25 @@ async function main() {
   const { state } = cur;
   await resendLost(ctx, cur).catch(() => {});
   const sid = shortIds(state.tasks);
-  const open_ = Object.values(state.tasks).filter(t => t.status === 'open');
+  const inside = L.inBox(state);
+  const takenOut = Object.values(state.tasks).filter(t => t.status === 'done').sort((a, b) => b.doneAt - a.doneAt);
 
   if (cmd === 'list') {
-    if (opt.tags) {
-      const tc = L.tagCounts(open_);
-      console.log(tc.length ? tc.map(([g, n]) => `#${g}（${n}）`).join('  ') : 'タグはまだありません');
-      return;
-    }
+    const pick = opt.done ? takenOut.slice(0, opt.json ? 200 : 20) : inside;
     if (opt.json) {
-      const pick = opt.done ? Object.values(state.tasks).filter(t => t.status === 'done') : open_;
-      console.log(JSON.stringify(L.sortTasks(pick).map(t => ({ id: t.id, short: sid.get(t.id), title: t.title, due: t.due, bucket: L.bucketOf(t, today), tags: t.tags, note: t.note, url: t.url, status: t.status, source: L.sourceLabel(t.from), addedAt: t.addedAt, doneAt: t.doneAt })), null, 1));
+      console.log(JSON.stringify(pick.map(t => ({ id: t.id, short: sid.get(t.id), title: t.title, note: t.note, url: t.url, status: t.status, source: L.sourceLabel(t.from), addedAt: t.addedAt, doneAt: t.doneAt })), null, 1));
       return;
     }
-    if (opt.done) {
-      const done = Object.values(state.tasks).filter(t => t.status === 'done').sort((a, b) => b.doneAt - a.doneAt).slice(0, 20);
-      console.log(`箱 HAKO — 済み（新しい順に${done.length}件）`);
-      for (const t of done) console.log(line(t, today, sid.get(t.id)));
-      return;
-    }
-    console.log(`箱 HAKO — 残り ${open_.length}件（${L.mdw(today)} 時点）`);
-    for (const g of L.groupTasks(open_, today)) {
-      console.log(`■ ${g.label}`);
-      for (const t of g.tasks) console.log(line(t, today, sid.get(t.id)));
-    }
-    if (!open_.length) console.log('  （空っぽです）');
+    console.log(opt.done ? `箱 HAKO — 取り出したもの（新しい順に${pick.length}件）` : `箱 HAKO — 箱の中 ${pick.length}件（新しく入れた順）`);
+    for (const t of pick) console.log(line(t, sid.get(t.id)));
+    if (!pick.length) console.log(opt.done ? '  （まだありません）' : '  （空っぽです）');
     return;
   }
 
   if (cmd === 'done' || cmd === 'reopen' || cmd === 'delete') {
     const t = resolve(state, pos.join(' '), cmd === 'reopen' ? 'done' : cmd === 'done' ? 'open' : null);
     await send(ctx, [ev(cmd === 'done' ? 'task.done' : cmd === 'reopen' ? 'task.reopen' : 'task.delete', { taskId: t.id })]);
-    console.log(`${cmd === 'done' ? '済みにしました' : cmd === 'reopen' ? '未完了に戻しました' : '削除しました'}: ${t.title}`);
+    console.log(`${cmd === 'done' ? '取り出しました' : cmd === 'reopen' ? '箱に戻しました' : '消しました'}: ${t.title}`);
     return;
   }
 
@@ -278,19 +252,16 @@ async function main() {
     const t = resolve(state, pos.join(' '), null);
     const edits = {};
     if (opt.title != null) edits.title = opt.title;
-    if (opt.due != null) edits.due = dueOpt(opt.due, today);
     if (opt.note != null) edits.note = opt.note;
-    if (opt.tag != null || opt.tags != null) edits.tags = String(opt.tag ?? opt.tags);
     if (opt.url != null) edits.url = opt.url;
-    if (!Object.keys(edits).length) stop('変える項目（--title / --due / --note / --tag / --url）を指定してください');
+    if (!Object.keys(edits).length) stop('変える項目（--title / --note / --url）を指定してください');
     await send(ctx, [ev('task.edit', { taskId: t.id, edits })]);
-    console.log(`直しました: ${edits.title || t.title}${has(edits, 'due') ? `（${edits.due ? L.mdw(edits.due) : '日付なし'}）` : ''}`);
+    console.log(`直しました: ${edits.title || t.title}`);
     return;
   }
 
-  stop(`知らないコマンドです: ${cmd}（add / list / done / reopen / edit / delete / today）`);
+  stop(`知らないコマンドです: ${cmd}（add / list / done / reopen / edit / delete）`);
 }
-const has = (o, k) => Object.hasOwn(o, k);
 
 try { await main(); }
 catch (e) {

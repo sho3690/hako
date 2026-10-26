@@ -4,7 +4,7 @@ import { keysFrom, deriveMaster, seal, open, b64u, PREFIX } from './crypto.js';
 import { publish, poll, MAX_BODY } from './relay.js';
 
 const $ = (s, el = document) => el.querySelector(s);
-const K = { cache: 'hako.cache', outbox: 'hako.outbox', sent: 'hako.sent', filter: 'hako.filter', seen: 'hako.seen', mine: 'hako.mine' };
+const K = { cache: 'hako.cache', outbox: 'hako.outbox', sent: 'hako.sent', draft: 'hako.draft' };
 const ls = {
   get: k => { try { return localStorage.getItem(k); } catch { return null; } },
   set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* 保存できなくても動く */ } },
@@ -65,12 +65,11 @@ function deviceLabel() {
   return 'ブラウザ';
 }
 const DEVICE = deviceLabel();
-const BUCKET_LABEL = Object.fromEntries(L.BUCKETS);
 
 // ---- アプリの状態 ----
 const app = {
-  cfg: null, keys: null, snap: null, relay: new Map(), outbox: [], sent: [], st: null, mine: new Set(),
-  view: 'today', filter: 'all', sheet: null, lastSnap: 0, relayOk: true, snapOk: true, trigger: null, es: null, pendingAdd: null, sig: '',
+  cfg: null, keys: null, snap: null, relay: new Map(), outbox: [], sent: [], st: null,
+  sheet: null, lastSnap: 0, relayOk: true, snapOk: true, trigger: null, es: null, pendingAdd: null, sig: '',
 };
 
 // ================= 起動 =================
@@ -81,7 +80,7 @@ async function boot() {
   const raw = location.hash.slice(1);
   const linkKey = raw.startsWith('k=') ? new URLSearchParams(raw).get('k') : null;
   app.pendingAdd = addRequestFrom(location.hash) || shareRequest();
-  if (linkKey || app.pendingAdd || location.search) history.replaceState(null, '', `${location.pathname}#/today`);
+  if (linkKey || app.pendingAdd || location.search) history.replaceState(null, '', location.pathname);
 
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
   try { app.cfg = await (await fetch('./config.json', { cache: 'no-store' })).json(); }
@@ -171,13 +170,10 @@ function start() {
   $('#lock').hidden = true; $('#shell').hidden = false;
   app.outbox = [];
   app.sent = ls.json(K.sent, []);
-  app.mine = new Set(ls.json(K.mine, []));
-  app.filter = ls.get(K.filter) || 'all';
-  if (!ls.get(K.seen)) ls.set(K.seen, String(Date.now()));
 
   wire();
   loadOutbox().then(() => { if (app.outbox.length) { recompute(); flushOutbox(); } });
-  route();
+  render();
   const cached = ls.json(K.cache, null);
   if (cached?.sealed) open(app.keys, cached.sealed).then(s => { if (!app.snap) { app.snap = s; recompute(); } }).catch(() => {});
   refresh();
@@ -190,16 +186,23 @@ let wired = false;
 function wire() {
   if (wired) return; wired = true;
   document.addEventListener('click', onAction);
-  window.addEventListener('hashchange', route);
+  window.addEventListener('hashchange', onHash);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(true); });
   window.addEventListener('online', () => { flushOutbox(); tick(true); });
-  // n で「箱に入れる」（入力中・シート表示中は何もしない）
+  wireComposer();
+  // n か / で入力欄へ（入力中・シート表示中は何もしない）
   document.addEventListener('keydown', e => {
-    if (e.key !== 'n' || e.metaKey || e.ctrlKey || e.altKey || e.isComposing || app.sheet || typing(e.target)) return;
-    e.preventDefault(); openSheet('add');
+    if ((e.key !== 'n' && e.key !== '/') || e.metaKey || e.ctrlKey || e.altKey || e.isComposing || app.sheet || typing(e.target)) return;
+    e.preventDefault(); $('#put').focus();
   });
+  // 入力欄が上に貼りついたら、下との境目に薄い影を出す（中身と重なって見えないように）
+  const bar = $('#composer-bar');
+  const stuck = () => bar.classList.toggle('stuck', window.scrollY > 0 && bar.getBoundingClientRect().top <= 0.5);
+  window.addEventListener('scroll', stuck, { passive: true });
+  stuck();
   const d = $('#sheet');
-  d.addEventListener('close', () => { app.sheet = null; d.replaceChildren(); app.trigger?.focus?.({ preventScroll: true }); app.trigger = null; });
+  // 「閉じた」の知らせは少し遅れて届く。そのあいだに次のシートを開いていたら、そちらを消さない
+  d.addEventListener('close', () => { if (d.open) return; app.sheet = null; d.replaceChildren(); app.trigger?.focus?.({ preventScroll: true }); app.trigger = null; });
   d.addEventListener('click', e => { if (e.target === d) d.close(); });
 }
 
@@ -310,11 +313,6 @@ async function loadOutbox() {
   if (!raw) return;
   try { const list = raw.startsWith(PREFIX) ? await open(app.keys, raw) : []; if (Array.isArray(list)) app.outbox = [...list, ...app.outbox]; } catch { /* 読めなければ捨てる */ }
 }
-function rememberMine(id) {
-  app.mine.add(id);
-  ls.set(K.mine, JSON.stringify([...app.mine].slice(-300)));
-}
-
 function shrink(ev, step) {
   const e = structuredClone(ev);
   const cut = (o, k, n) => { if (o && typeof o[k] === 'string' && o[k].length > n) o[k] = o[k].slice(0, n); };
@@ -351,30 +349,48 @@ async function flushOutbox() {
   finally { flushing = false; renderBanner(); }
 }
 
-// ================= 画面の切り替え =================
-function route() {
-  const req = addRequestFrom(location.hash);   // 開いている最中に追加のリンクを押したとき
-  if (req) {
-    history.replaceState(null, '', `${location.pathname}#/${app.view}`);
-    if (!app.keys) { app.pendingAdd = req; return; }
-    const ta = app.sheet?.kind === 'add' ? $('#add-text') : null;
-    if (ta) { ta.value = [ta.value.trim(), req.text].filter(Boolean).join('\n'); ta.dispatchEvent(new Event('input')); ta.focus(); return; }
-    openSheet('add', req);
-    return;
+// ================= 入れる（いつも上にある入力欄）=================
+function wireComposer() {
+  const form = $('#composer'), put = $('#put');
+  const grow = () => { put.style.height = 'auto'; put.style.height = `${Math.min(put.scrollHeight, 168)}px`; };
+  put.value = ls.get(K.draft) || '';   // 書きかけは端末に残す（閉じても消えない）
+  grow();
+  put.addEventListener('input', () => { grow(); ls.set(K.draft, put.value); });
+  // Enter で入れる。Shift+Enter で改行。日本語の変換を確定する Enter では入れない（Safari は keyCode 229）
+  put.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+    e.preventDefault(); form.requestSubmit();
+  });
+  form.addEventListener('submit', e => {
+    e.preventDefault();
+    const list = L.parseInput(put.value);
+    if (!list.length) { put.focus(); return; }
+    const ids = putIn(list, '', 'app');
+    put.value = ''; ls.del(K.draft); grow(); put.focus();
+    toast(ids.length > 1 ? `${ids.length}件を入れました` : '入れました', { label: '取り消す', fn: () => ids.forEach(id => send('task.delete', { taskId: id })) });
+  });
+}
+function putIn(list, note, via) {
+  const ids = [];
+  for (const p of list) {
+    const id = uid();
+    ids.push(id);
+    send('task.add', { task: { id, title: p.title, url: p.url, note, from: { via, device: DEVICE } } });
   }
-  const v = (location.hash.match(/^#\/(today|box|done)/) || [])[1] || 'today';
-  const changed = v !== app.view;
-  app.view = v;
-  if (v === 'box') ls.set(K.seen, String(Date.now()));
-  render();
-  if (changed) { window.scrollTo(0, 0); $('#view').focus({ preventScroll: true }); }
+  return ids;
 }
 
+// 「#/add?t=…」のリンクを、開いている最中に押したとき
+function onHash() {
+  const req = addRequestFrom(location.hash);
+  if (!req) return;
+  history.replaceState(null, '', location.pathname);
+  if (!app.keys) { app.pendingAdd = req; return; }
+  openSheet('add', req);
+}
+
+// ================= 箱の中 =================
 function render() {
-  for (const a of document.querySelectorAll('.tabs a')) {
-    if (a.dataset.view === app.view) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
-  }
-  renderBadge();
   renderBanner();
   const view = $('#view');
   const st = app.st;
@@ -384,31 +400,27 @@ function render() {
       h('p', {}, '電波の良い所で、もう一度お試しください。'), h('button', { class: 'btn btn-primary', type: 'button', 'data-action': 'reload' }, '読み込み直す')));
     return;
   }
-  const parts = app.view === 'box' ? viewBox(st) : app.view === 'done' ? viewDone(st) : viewToday(st);
-  const openFolds = new Set([...view.querySelectorAll('details[open][data-fold]')].map(d => d.dataset.fold));
-  view.replaceChildren(...parts.filter(Boolean));
-  for (const d of view.querySelectorAll('details[data-fold]')) if (openFolds.has(d.dataset.fold)) d.open = true;
+  const list = L.inBox(st);
+  view.replaceChildren(...(list.length
+    ? [h('h1', { class: 'box-head' }, '箱の中', h('span', { class: 'count' }, `${list.length}件`)),
+      h('ul', { class: 'tasks', 'aria-label': '箱の中' }, list.map(taskRow))]
+    : [h('h1', { class: 'visually-hidden' }, '箱の中'),
+      h('section', { class: 'empty', 'aria-labelledby': 'empty-title' },
+        h('span', { class: 'ic-wrap' }, icon('box')),
+        h('h2', { id: 'empty-title' }, '箱は空っぽです'),
+        h('p', {}, '思いついたこと・頼まれたことを、上の欄から入れてください。'),
+        h('p', { class: 'hint' }, 'このMacの Claude に「〇〇を『箱』に入れておいて」と言っても届きます。'))]));
   if (focusKey) view.querySelector(`[data-key="${CSS.escape(focusKey)}"]`)?.focus({ preventScroll: true });
-  // 開いているシート: 入力中は書き換えない。詳細はその項目が変わったときだけ描き直す（削除の確認やフォーカスを消さない）
+  // 開いている詳細: 入力中は書き換えない。その項目が変わったときだけ描き直す（フォーカスを消さない）
   const sh = app.sheet;
-  if (sh?.kind === 'pick') renderSheet();
-  else if (sh?.kind === 'detail' && !sh.draft && JSON.stringify(st.tasks[sh.id] ?? null) !== sh.sig) renderSheet();
-}
-
-function renderBadge() {
-  const b = $('.tabs a[data-view="box"] .badge');
-  if (!b || !app.st) return;
-  const seen = Number(ls.get(K.seen) || 0);
-  const n = app.view === 'box' ? 0 : Object.values(app.st.tasks).filter(t => t.status === 'open' && t.addedAt > seen && !app.mine.has(t.id)).length;
-  b.hidden = !n; b.textContent = n > 99 ? '99+' : String(n);
-  b.setAttribute('aria-label', `新しく届いたもの${n}件`);
+  if (sh?.kind === 'detail' && !sh.draft && JSON.stringify(st.tasks[sh.id] ?? null) !== sh.sig) renderSheet();
 }
 
 function renderBanner() {
   const el = $('#banner');
   if (!el) return;
   let msg = null, action = null;
-  if (app.outbox.length && !app.relayOk) { msg = `送れていない変更が${app.outbox.length}件あります。つながったら自動で送り直します。`; action = h('button', { class: 'btn btn-secondary btn-sm', type: 'button', 'data-action': 'retry' }, '今すぐ送る'); }
+  if (app.outbox.length && !app.relayOk) { msg = `送れていないものが${app.outbox.length}件あります。つながったら自動で送り直します。`; action = h('button', { class: 'btn btn-secondary btn-sm', type: 'button', 'data-action': 'retry' }, '今すぐ送る'); }
   else if (!app.snapOk && !app.snap) { msg = 'データを読み込めませんでした。電波の良い所でもう一度お試しください。'; action = h('button', { class: 'btn btn-secondary btn-sm', type: 'button', 'data-action': 'reload' }, '読み込み直す'); }
   el.hidden = !msg;
   if (msg) el.replaceChildren(h('span', {}, msg), action);
@@ -417,124 +429,19 @@ function renderBanner() {
 function loadingView() {
   const row = () => h('li', { class: 'task', 'aria-hidden': 'true' }, h('span', { class: 'check' }, h('span', { class: 'box' })),
     h('span', { class: 'task-main' }, h('span', { class: 'skeleton sk-line' }), h('span', { class: 'skeleton sk-line short' })));
-  return h('section', { 'aria-busy': 'true', 'aria-label': '読み込み中' },
-    h('div', { class: 'page-head' }, h('span', { class: 'skeleton sk-line', 'aria-hidden': 'true' })),
-    h('ul', { class: 'tasks' }, row(), row(), row()));
+  return h('section', { 'aria-busy': 'true', 'aria-label': '読み込み中' }, h('ul', { class: 'tasks' }, row(), row(), row()));
 }
 
-// ================= 1件の行 =================
-function taskRow(t, today) {
-  const done = t.status === 'done';
-  const late = !done && t.due && t.due < today;
+function taskRow(t) {
   const meta = [];
-  if (t.due && !done) meta.push(h('span', { class: late ? 'late' : t.due <= L.addDays(today, 1) ? 'soon' : null },
-    late ? `${L.dueLabel(t.due, today)}・${L.overdueDays(t.due, today)}日過ぎ` : L.dueLabel(t.due, today)));
-  for (const g of t.tags) meta.push(h('span', { class: 'tag' }, `#${g}`));
-  if (t.url && L.shortUrl(t.url) !== t.title) meta.push(h('span', {}, icon('link'), L.shortUrl(t.url)));
+  if (t.url && !t.title.includes(L.shortUrl(t.url))) meta.push(h('span', {}, icon('link'), L.shortUrl(t.url)));
   if (t.from?.via === 'claude' || t.from?.via === 'link') meta.push(h('span', { class: 'via' }, t.from.via === 'claude' && icon('spark'), L.sourceLabel(t.from)));
-  return h('li', { class: `task${done ? ' is-done' : ''}` },
-    h('button', { class: 'check', type: 'button', 'aria-pressed': String(done), 'aria-label': done ? `「${t.title}」を未完了に戻す` : `「${t.title}」を済みにする`,
-      'data-action': done ? 'reopen' : 'done', 'data-id': t.id, 'data-key': `c-${t.id}` }, h('span', { class: 'box' }, icon('check'))),
+  return h('li', { class: 'task' },
+    h('button', { class: 'check', type: 'button', 'aria-label': `「${t.title}」を取り出す`, 'data-action': 'done', 'data-id': t.id, 'data-key': `c-${t.id}` }, h('span', { class: 'box' }, icon('check'))),
     h('button', { class: 'task-main', type: 'button', 'data-action': 'open', 'data-id': t.id, 'data-key': `o-${t.id}` },
       h('span', { class: 'task-title' }, t.title),
-      t.note && !done && h('span', { class: 'task-note' }, t.note.split('\n').find(Boolean)),
+      t.note ? h('span', { class: 'task-note' }, t.note.split('\n').find(Boolean)) : null,
       meta.length ? h('span', { class: 'meta' }, meta) : null));
-}
-function group(key, label, tasks, today, { late = false } = {}) {
-  return h('section', { class: 'group', 'aria-labelledby': `g-${key}` },
-    h('div', { class: `group-head${late ? ' late' : ''}` }, late && h('span', { class: 'late-ic', 'aria-hidden': 'true' }, '!'),
-      h('h2', { id: `g-${key}` }, label), h('span', { class: 'n' }, `${tasks.length}件`)),
-    h('ul', { class: 'tasks' }, tasks.map(t => taskRow(t, today))));
-}
-function empty(ic, title, text, button, hint) {
-  return h('section', { class: 'empty', 'aria-labelledby': 'empty-title' },
-    h('span', { class: 'ic-wrap' }, icon(ic)), h('h2', { id: 'empty-title' }, title), h('p', {}, text), button, hint && h('p', { class: 'hint' }, hint));
-}
-const addButton = (label = '箱に入れる') => h('button', { class: 'btn btn-primary', type: 'button', 'data-action': 'add', 'data-key': 'add-empty' }, icon('plus'), label);
-const pickButton = (cls = 'btn-primary') => h('button', { class: `btn ${cls}`, type: 'button', 'data-action': 'pick', 'data-key': 'pick' }, icon('box'), '箱から選ぶ');
-
-// ================= 今日 =================
-function viewToday(st) {
-  const today = L.jstToday();
-  const all = Object.values(st.tasks);
-  const openList = all.filter(t => t.status === 'open');
-  const late = L.sortTasks(openList.filter(t => t.due && t.due < today));
-  const now = L.sortTasks(openList.filter(t => t.due === today));
-  const doneToday = all.filter(t => t.status === 'done' && L.jstToday(t.doneAt) === today).sort((a, b) => b.doneAt - a.doneAt);
-  const left = late.length + now.length;
-  const others = openList.length - left;
-  const total = left + doneToday.length;
-  const bar = h('div', { class: 'progress', role: 'img', 'aria-label': `今日の分 ${total}件のうち ${doneToday.length}件 済み` }, h('i'));
-  bar.firstChild.style.width = `${total ? Math.round((doneToday.length / total) * 100) : 0}%`;
-  const out = [h('div', { class: 'page-head' },
-    h('h1', {}, '今日'),
-    h('p', { class: 'sub today-sum' }, h('strong', {}, L.mdw(today)), left ? h('span', {}, `残り ${left}件`) : null, doneToday.length ? h('span', {}, `済み ${doneToday.length}件`) : null),
-    total ? bar : null)];
-
-  if (!left) {
-    out.push(doneToday.length
-      ? empty('done', '今日の分は終わりました', `${doneToday.length}件 済ませました。${others ? '箱から次にやることを選ぶこともできます。' : ''}`, others ? pickButton('btn-secondary') : null)
-      : empty('today', '今日やることはありません', '日付が今日のもの・過ぎたものがここに並びます。箱から選んで、今日やることにできます。',
-        others ? pickButton() : addButton(), others ? null : 'このMacの Claude に「〇〇を『箱』に入れておいて」と言っても届きます。'));
-  } else {
-    if (late.length) out.push(group('late', '過ぎています', late, today, { late: true }));
-    if (now.length) out.push(group('today', '今日', now, today));
-    if (others) out.push(h('div', { class: 'more-row' }, pickButton('btn-secondary')));
-  }
-
-  const soon = L.sortTasks(openList.filter(t => t.due > today && t.due <= L.addDays(today, 7)));
-  if (soon.length) {
-    out.push(h('h2', { class: 'preview-title', id: 'soon-title' }, 'これから', h('small', {}, '7日以内')),
-      h('ul', { class: 'tasks', 'aria-labelledby': 'soon-title' }, soon.slice(0, 5).map(t => taskRow(t, today))),
-      soon.length > 5 && h('div', { class: 'more-row' }, h('a', { class: 'btn btn-tertiary btn-sm', href: '#/box' }, `ほか${soon.length - 5}件を箱で見る`)));
-  }
-  if (doneToday.length && left) {
-    out.push(h('details', { class: 'fold', 'data-fold': 'done-today' }, h('summary', {}, `今日済ませたもの（${doneToday.length}件）`),
-      h('ul', { class: 'tasks' }, doneToday.map(t => taskRow(t, today)))));
-  }
-  return out;
-}
-
-// ================= 箱 =================
-function boxFilters(list) {
-  const f = [['all', 'すべて', () => true], ['none', '日付なし', t => !t.due]];
-  if (list.some(t => t.from?.via === 'claude')) f.push(['claude', 'Claude から', t => t.from?.via === 'claude']);
-  for (const [g] of L.tagCounts(list).slice(0, 6)) f.push([`tag:${g}`, `#${g}`, t => t.tags.includes(g)]);
-  return f;
-}
-function viewBox(st) {
-  const today = L.jstToday();
-  const openList = Object.values(st.tasks).filter(t => t.status === 'open');
-  const head = h('div', { class: 'page-head' }, h('h1', {}, '箱', h('span', { class: 'count' }, `${openList.length}件`)),
-    h('p', { class: 'sub' }, '思いついたこと・頼まれたこと・Claude に預けたことを、全部ここに集めます。'));
-  if (!openList.length) return [head, empty('box', '箱は空っぽです', 'このMacの Claude Code なら、どの会話でも「〇〇を『箱』に入れておいて」と言えば、ここに届きます。',
-    addButton(), '「明日」「金曜」「10/30」と書けば日付が、#仕事 と書けばタグが付きます。')];
-  const filters = boxFilters(openList);
-  const f = filters.find(x => x[0] === app.filter) || filters[0];
-  const list = openList.filter(f[2]);
-  const chips = h('div', { class: 'chips', role: 'group', 'aria-label': '絞り込み' },
-    filters.map(([key, label, fn]) => h('button', { class: 'chip', type: 'button', 'aria-pressed': String(key === f[0]), 'data-action': 'filter', 'data-filter': key, 'data-key': `f-${key}` },
-      label, h('span', { class: 'n' }, String(openList.filter(fn).length)))));
-  const groups = L.groupTasks(list, today).map(g => group(g.key, g.label, g.tasks, today, { late: g.key === 'overdue' }));
-  return [head, chips, ...(groups.length ? groups : [h('p', { class: 'help', role: 'status' }, 'この条件に合うものはありません。')])];
-}
-
-// ================= 済み =================
-function viewDone(st) {
-  const today = L.jstToday();
-  const done = Object.values(st.tasks).filter(t => t.status === 'done').sort((a, b) => b.doneAt - a.doneAt);
-  const head = h('div', { class: 'page-head' }, h('h1', {}, '済み', h('span', { class: 'count' }, `${done.length}件`)),
-    h('p', { class: 'sub' }, '丸を押すと未完了に戻せます。済んでから半年たったものは自動で片づけます。'));
-  if (!done.length) return [head, empty('done', 'まだありません', '箱や今日の画面で丸を押して済ませたものが、ここに残ります。', null)];
-  const groups = new Map();
-  for (const t of done) {
-    const d = L.jstToday(t.doneAt);
-    const age = L.diffDays(d, today);
-    const label = age === 0 ? '今日' : age === 1 ? '昨日' : age < 30 ? L.dueLabel(d, today) : `${d.slice(0, 4)}年${+d.slice(5, 7)}月`;
-    if (!groups.has(label)) groups.set(label, []);
-    groups.get(label).push(t);
-  }
-  return [head, ...[...groups].map(([label, list], i) => group(`d${i}`, label, list, today))];
 }
 
 // ================= シート =================
@@ -554,7 +461,7 @@ function renderSheet() {
   const s = app.sheet;
   if (!s) return;
   const d = $('#sheet');
-  const parts = s.kind === 'add' ? sheetAdd(s) : s.kind === 'detail' ? sheetDetail(s) : s.kind === 'settings' ? sheetSettings() : s.kind === 'pick' ? sheetPick() : null;
+  const parts = s.kind === 'add' ? sheetAdd(s) : s.kind === 'detail' ? sheetDetail(s) : s.kind === 'settings' ? sheetSettings() : null;
   if (!parts) { closeSheet(); return; }
   const scroll = d.querySelector('.sheet-body')?.scrollTop || 0;
   const had = d.contains(document.activeElement) ? document.activeElement : null;
@@ -563,7 +470,7 @@ function renderSheet() {
   const body = d.querySelector('.sheet-body');
   if (body) body.scrollTop = scroll;
   // 描き直してもフォーカスをシートの中に保つ（キーボードで操作していても迷子にならない）
-  if (had) (focusSel && d.querySelector(focusSel) || d.querySelector('.pick button, .sheet-head .icon-btn'))?.focus({ preventScroll: true });
+  if (had) (focusSel && d.querySelector(focusSel) || d.querySelector('.sheet-head .icon-btn'))?.focus({ preventScroll: true });
 }
 
 function sheetHead(title, kicker) {
@@ -572,151 +479,70 @@ function sheetHead(title, kicker) {
     h('button', { class: 'icon-btn', type: 'button', 'aria-label': '閉じる', 'data-action': 'close' }, icon('x')));
 }
 
-// 日付を選ぶ部品（なし・今日・明日・今週末・来週・カレンダー）
-function datePicker(id, initial, onChange) {
-  const today = L.jstToday();
-  let value = initial || '';
-  const quick = L.quickDates(today);
-  const chips = quick.map(([d, label]) => h('button', { class: 'chip', type: 'button', 'data-date': d, onclick: () => set(d) }, label));
-  const cal = h('input', { class: 'input', id, type: 'date', 'aria-label': '日付をカレンダーから選ぶ', onchange: e => set(e.target.value || '') });
-  const sync = () => {
-    const hit = quick.some(([d]) => d === value);
-    for (const c of chips) c.setAttribute('aria-pressed', String(c.dataset.date === value && (hit || !value)));
-    cal.value = value && !hit ? value : '';
-  };
-  function set(d) { value = L.validYmd(d) ? d : ''; sync(); onChange(value); }
-  sync();
-  return { el: h('div', { class: 'date-row', role: 'group', 'aria-label': 'いつ' }, chips, h('span', { class: 'date-pick' }, cal)), get: () => value };
-}
-
-// ---- 入れる ----
+// ---- リンク・共有から届いたものを入れる前の確認（勝手には入れない）----
 function sheetAdd(s) {
-  const today = L.jstToday();
   const err = h('p', { class: 'err', id: 'add-err', hidden: true });
-  const ta = h('textarea', { class: 'textarea add-text', id: 'add-text', rows: '3', autofocus: true, enterkeyhint: 'enter', 'aria-describedby': 'add-help add-err',
-    placeholder: '例: 明日 歯医者に電話\n経費精算 #仕事' });
+  const ta = h('textarea', { class: 'textarea', id: 'add-text', rows: '3', autofocus: true, 'aria-describedby': 'add-help add-err', oninput: () => { if (app.sheet) app.sheet.draft = true; } });
   ta.value = s.text || '';
-  const note = h('textarea', { class: 'textarea', id: 'add-note', rows: '2', 'aria-describedby': 'add-note-help' });
+  const note = h('textarea', { class: 'textarea', id: 'add-note', rows: '2' });
   note.value = s.note || '';
-  const parsed = h('ul', { class: 'parsed', 'aria-label': '入れるもの' });
-  const previewWrap = h('div', { class: 'field', 'aria-live': 'polite' }, h('span', { class: 'label', id: 'parsed-label' }, '入れるもの'), parsed);
-  const submit = h('button', { class: 'btn btn-primary', type: 'submit', form: 'add-form' }, '箱に入れる');
-  const picker = datePicker('add-date', s.due || '', () => update());
-  function update() {
-    const list = L.parseInput(ta.value, today);
-    const fallback = picker.get();
-    parsed.replaceChildren(...list.map(t => {
-      const due = t.due || fallback;
-      return h('li', {}, h('span', { class: 't' }, t.title),
-        h('span', { class: 'd' }, due ? h('b', {}, L.dueLabel(due, today)) : '日付なし', t.tags.map(g => ` #${g}`).join(''), t.url ? ' · リンク付き' : ''));
-    }));
-    previewWrap.hidden = !list.length;
-    submit.textContent = list.length > 1 ? `箱に入れる（${list.length}件）` : '箱に入れる';
-  }
-  ta.addEventListener('input', () => { err.hidden = true; ta.setAttribute('aria-invalid', 'false'); if (app.sheet) app.sheet.draft = true; update(); });
-  ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); form.requestSubmit(); } });
-  const form = h('form', { id: 'add-form', novalidate: true, onsubmit: e => { e.preventDefault(); submitAdd(s, ta, note, picker.get(), err); } },
-    h('div', { class: 'field' },
-      h('label', { for: 'add-text' }, 'やること'),
-      ta,
-      h('p', { class: 'help', id: 'add-help' }, '1行に1つ。「明日」「金曜」「10/30」と書けば日付が、#仕事 と書けばタグが付きます。'),
-      err),
-    h('div', { class: 'field' }, h('span', { class: 'label' }, 'いつ', h('span', { class: 'opt' }, '日付を書いていないものに付きます')), picker.el),
-    previewWrap,
-    h('div', { class: 'field' },
-      h('label', { for: 'add-note' }, 'メモ', h('span', { class: 'opt' }, '任意')),
-      note,
-      h('p', { class: 'help', id: 'add-note-help' }, 'あとで見返すときの手がかり（なぜ・どこで・だれに など）。入れるもの全部に付きます。')));
-  update();
-  return [sheetHead('箱に入れる', s.via === 'link' ? 'リンクから届いた内容です。確かめてから入れてください' : null), h('div', { class: 'sheet-body' }, form),
+  const form = h('form', { id: 'add-form', novalidate: true, onsubmit: e => {
+    e.preventDefault();
+    const list = L.parseInput(ta.value);
+    if (!list.length) { err.hidden = false; err.textContent = '入れるものを書いてください'; ta.setAttribute('aria-invalid', 'true'); ta.focus(); return; }
+    const ids = putIn(list, note.value.trim(), s.via || 'link');
+    closeSheet();
+    toast(ids.length > 1 ? `${ids.length}件を入れました` : '入れました', { label: '取り消す', fn: () => ids.forEach(id => send('task.delete', { taskId: id })) });
+  } },
+  h('div', { class: 'field' }, h('label', { for: 'add-text' }, '入れるもの'), ta,
+    h('p', { class: 'help', id: 'add-help' }, '1行に1つ。直してから入れられます。'), err),
+  h('div', { class: 'field' }, h('label', { for: 'add-note' }, 'メモ', h('span', { class: 'opt' }, '任意')), note));
+  return [sheetHead('箱に入れる', s.via === 'share' ? '共有から届きました' : 'リンクから届きました。確かめてから入れてください'),
+    h('div', { class: 'sheet-body' }, form),
     h('div', { class: 'sheet-foot' },
-      h('span', { class: 'kbd-hint' }, '⌘ + Enter でも入れられます'),
       h('button', { class: 'btn btn-tertiary', type: 'button', 'data-action': 'close' }, 'やめる'),
-      submit)];
+      h('button', { class: 'btn btn-primary', type: 'submit', form: 'add-form' }, '箱に入れる'))];
 }
 
-function submitAdd(s, ta, noteEl, fallbackDue, err) {
-  const today = L.jstToday();
-  const list = L.parseInput(ta.value, today);
-  if (!list.length) { err.hidden = false; err.textContent = 'やることを入れてください'; ta.setAttribute('aria-invalid', 'true'); ta.focus(); return; }
-  const note = noteEl.value.trim();
-  const ids = [];
-  for (const p of list) {
-    const id = uid();
-    ids.push(id); rememberMine(id);
-    send('task.add', { task: { id, title: p.title, due: p.due || fallbackDue, tags: p.tags, url: p.url, note, from: { via: s.via || 'app', device: DEVICE } } });
-  }
-  closeSheet();
-  toast(`${ids.length}件を箱に入れました`, { label: '取り消す', fn: () => ids.forEach(id => send('task.delete', { taskId: id })) });
-}
-
-// ---- 詳細（その場で直せる）----
+// ---- 1つを開く（その場で直せる）----
 function sheetDetail(s) {
   const st = app.st;
   const t = L.has(st?.tasks, s.id) ? st.tasks[s.id] : null;
-  if (!t) return null;
+  if (!t || t.status !== 'open') return null;
   s.sig = JSON.stringify(t);
-  const today = L.jstToday();
-  const done = t.status === 'done';
   const err = h('p', { class: 'err', id: 'd-err', hidden: true });
   const draft = () => { if (app.sheet) app.sheet.draft = true; };
-  const title = h('input', { class: 'input', id: 'd-title', type: 'text', value: t.title, maxlength: '200', required: true, onkeydown: imeGuard, oninput: draft, 'aria-describedby': 'd-err' });
-  const picker = datePicker('d-date', t.due, draft);
+  const title = h('textarea', { class: 'textarea title-input', id: 'd-title', rows: '2', maxlength: '200', onkeydown: imeGuard, oninput: draft, 'aria-describedby': 'd-err' });
+  title.value = t.title;
   const note = h('textarea', { class: 'textarea', id: 'd-note', rows: '4', oninput: draft });
   note.value = t.note;
-  const tags = h('input', { class: 'input', id: 'd-tags', type: 'text', value: t.tags.join(' '), onkeydown: imeGuard, oninput: draft, 'aria-describedby': 'd-tags-help' });
   const urlErr = h('p', { class: 'err', id: 'd-url-err', hidden: true });
   const url = h('input', { class: 'input', id: 'd-url', type: 'url', inputmode: 'url', value: t.url, autocapitalize: 'off', spellcheck: 'false', placeholder: 'https://', onkeydown: imeGuard, oninput: draft, 'aria-describedby': 'd-url-err' });
   const form = h('form', { id: 'detail-form', novalidate: true, onsubmit: e => {
     e.preventDefault();
     err.hidden = true; urlErr.hidden = true;
     const nt = title.value.replace(/\s+/g, ' ').trim();
-    if (!nt) { err.hidden = false; err.textContent = 'やることを入れてください'; title.setAttribute('aria-invalid', 'true'); title.focus(); return; }
+    if (!nt) { err.hidden = false; err.textContent = '中身を書いてください'; title.setAttribute('aria-invalid', 'true'); title.focus(); return; }
     const nu = url.value.trim();
     if (nu && !L.safeUrl(nu)) { urlErr.hidden = false; urlErr.textContent = 'https:// から始まるリンクを入れてください'; url.setAttribute('aria-invalid', 'true'); url.focus(); return; }
     const edits = {};
     if (nt !== t.title) edits.title = nt;
-    if (picker.get() !== t.due) edits.due = picker.get();
     if (note.value.trim() !== t.note) edits.note = note.value.trim();
-    const nTags = L.sanitizeTags(tags.value);
-    if (nTags.join(' ') !== t.tags.join(' ')) edits.tags = nTags;
     if ((L.safeUrl(nu) || '') !== t.url) edits.url = nu;
     closeSheet();
-    if (!L.has(app.st?.tasks, t.id)) { toast('この項目は別の端末で削除されていたため、保存できませんでした'); return; }
+    if (!L.has(app.st?.tasks, t.id)) { toast('別の端末で消されていたため、保存できませんでした'); return; }
     if (Object.keys(edits).length) { send('task.edit', { taskId: t.id, edits }); toast('保存しました'); }
   } },
-  h('div', { class: 'field' }, h('label', { for: 'd-title' }, 'やること'), title, err),
-  h('div', { class: 'field' }, h('span', { class: 'label' }, 'いつ'), picker.el),
+  h('div', { class: 'field' }, h('label', { for: 'd-title' }, '中身'), title, err),
   h('div', { class: 'field' }, h('label', { for: 'd-note' }, 'メモ', h('span', { class: 'opt' }, '任意')), note),
-  h('div', { class: 'field' }, h('label', { for: 'd-tags' }, 'タグ', h('span', { class: 'opt' }, '任意')), tags,
-    h('p', { class: 'help', id: 'd-tags-help' }, 'スペースで区切ります（例: 仕事 買い物）。5つまで。')),
   h('div', { class: 'field' }, h('label', { for: 'd-url' }, 'リンク', h('span', { class: 'opt' }, '任意')), url, urlErr,
     t.url && h('a', { class: 'link-out', href: t.url, target: '_blank', rel: 'noopener noreferrer' }, icon('out'), `${L.shortUrl(t.url)} を開く`)));
-
-  const quick = done
-    ? [h('button', { class: 'btn btn-secondary', type: 'button', 'data-action': 'reopen', 'data-id': t.id }, icon('refresh'), '未完了に戻す')]
-    : [h('button', { class: 'btn btn-secondary', type: 'button', 'data-action': 'done', 'data-id': t.id }, icon('done'), '済みにする'),
-      t.due !== today && h('button', { class: 'btn btn-secondary', type: 'button', 'data-action': 'set-due', 'data-id': t.id, 'data-due': today }, icon('sun'), '今日やる'),
-      t.due && t.due <= today && h('button', { class: 'btn btn-secondary', type: 'button', 'data-action': 'set-due', 'data-id': t.id, 'data-due': L.addDays(today, 1) }, icon('later'), '明日に回す')];
   const src = L.sourceLabel(t.from);
-  const byline = [`${hm(t.addedAt)} に${src ? `${src}から` : ''}入れました`, t.updatedAt > t.addedAt + 1000 && `${hm(t.updatedAt)} に更新`, done && `${hm(t.doneAt)} に済ませました`].filter(Boolean).join(' · ');
-  return [sheetHead(t.title, done ? '済み' : BUCKET_LABEL[L.bucketOf(t, today)]),
-    h('div', { class: 'sheet-body' }, h('div', { class: 'quick' }, quick), form, h('p', { class: 'byline' }, byline)),
+  return [sheetHead(t.title),
+    h('div', { class: 'sheet-body' }, form, h('p', { class: 'byline' }, `${hm(t.addedAt)} に${src ? `${src}から` : ''}入れました`)),
     h('div', { class: 'sheet-foot' },
-      h('button', { class: 'btn btn-danger', type: 'button', 'data-action': 'delete', 'data-id': t.id }, icon('trash'), '削除'),
+      h('button', { class: 'btn btn-secondary', type: 'button', 'data-action': 'done', 'data-id': t.id }, icon('check'), '取り出す'),
       h('button', { class: 'btn btn-primary', type: 'submit', form: 'detail-form' }, '変更を保存'))];
-}
-
-// ---- 箱から今日やることを選ぶ ----
-function sheetPick() {
-  const today = L.jstToday();
-  const list = L.sortTasks(Object.values(app.st?.tasks || {}).filter(t => t.status === 'open' && !(t.due && t.due <= today)));
-  return [sheetHead('今日やることを選ぶ', '押したものが今日に入ります'),
-    h('div', { class: 'sheet-body' }, list.length
-      ? h('ul', { class: 'pick' }, list.map(t => h('li', {}, h('button', { type: 'button', 'data-action': 'choose', 'data-id': t.id },
-        h('span', {}, t.title), h('span', { class: 's' }, [t.due ? L.dueLabel(t.due, today) : '日付なし', ...t.tags.map(g => `#${g}`), L.sourceLabel(t.from)].filter(Boolean).join(' · '))))))
-      : h('p', { class: 'help', role: 'status' }, 'ほかに選べるものはありません。')),
-    h('div', { class: 'sheet-foot' }, h('button', { class: 'btn btn-secondary', type: 'button', 'data-action': 'close' }, '閉じる'))];
 }
 
 // ---- 設定 ----
@@ -727,18 +553,18 @@ function sheetSettings() {
   const status = app.outbox.length ? ['wait', `送信待ち ${app.outbox.length}件`] : app.relayOk && app.snapOk ? ['', '最新です'] : ['off', 'つながっていません'];
   return [sheetHead('設定'), h('div', { class: 'sheet-body' },
     h('section', { class: 'settings-group' }, h('h3', {}, 'Claude から入れる'),
-      h('p', {}, 'このMacの Claude Code なら、どの会話・どのフォルダからでも、こう言えば届きます。やることの言い方・日付・メモは Claude が会話から読み取ります。'),
+      h('p', {}, 'このMacの Claude Code なら、どの会話・どのフォルダからでも、こう言えば届きます。何をどう書くか・メモは Claude が会話から決めます。'),
       h('p', { class: 'say' }, '「〇〇を『箱』に入れておいて」'),
-      h('p', { class: 'mt' }, '「箱に何がある？」「〇〇は済んだ」「〇〇を金曜にして」も伝わります。'),
-      h('p', {}, 'スマホの Claude や claude.ai からは、Claude に「箱に入れるリンクを作って」と頼んでください。リンクを押すと、この画面で入れる前の確認が開きます（このリンクの形）:'),
-      h('code', { class: 'code-line' }, `${template}やること&n=メモ`),
+      h('p', { class: 'mt' }, '「箱に何がある？」「〇〇は済んだから出して」も伝わります。'),
+      h('p', {}, 'スマホの Claude や claude.ai からは、Claude に「箱に入れるリンクを作って」と頼んでください。リンクを押すと、この画面で入れる前の確認が開きます（リンクの形）:'),
+      h('code', { class: 'code-line' }, `${template}入れるもの&n=メモ`),
       h('div', { class: 'actions-row' }, h('button', { class: 'btn btn-secondary btn-sm', type: 'button', 'data-action': 'copy-template', 'data-text': template }, icon('copy'), 'リンクの形をコピー'))),
     h('section', { class: 'settings-group' }, h('h3', {}, '別の端末で開く'),
       h('p', {}, '合言葉を入れると、合言葉なしで開けるリンクを作ります。自分のスマホなどにだけ送ってください（AirDrop など）。'),
       deviceLinkForm()),
     h('section', { class: 'settings-group' }, h('h3', {}, '同期'),
       h('p', { class: 'status' }, h('span', { class: `dot ${status[0]}`, 'aria-hidden': 'true' }), status[1], st?.syncedAt ? ` · 最終保存 ${hm(st.syncedAt)}` : ''),
-      h('p', { class: 'mt' }, '入れたもの・変更は、すぐ他の端末にも届きます。保存は15分ごとに自動で行います。'),
+      h('p', { class: 'mt' }, '入れたもの・取り出したものは、すぐ他の端末にも届きます。保存は15分ごとに自動で行います。'),
       h('div', { class: 'actions-row' }, h('button', { class: 'btn btn-secondary btn-sm', type: 'button', 'data-action': 'reload' }, icon('refresh'), '今すぐ更新'))),
     h('section', { class: 'settings-group' }, h('h3', {}, 'この端末'),
       h('p', {}, 'この端末から鍵を消します。もう一度使うときは合言葉か、開くためのリンクが必要です。'),
@@ -789,59 +615,19 @@ function onAction(e) {
   if (!el || el.disabled) return;
   const a = el.dataset.action;
   const id = el.dataset.id;
-  const st = app.st;
-  const t = id && L.has(st?.tasks, id) ? st.tasks[id] : null;
+  const t = id && L.has(app.st?.tasks, id) ? app.st.tasks[id] : null;
   switch (a) {
     case 'close': closeSheet(); break;
-    case 'add': openSheet('add'); break;
     case 'settings': openSheet('settings'); break;
     case 'open': if (t) openSheet('detail', { id }); break;
-    case 'pick': openSheet('pick'); break;
-    case 'filter': app.filter = el.dataset.filter; ls.set(K.filter, app.filter); render(); break;
     case 'retry': flushOutbox(); break;
     case 'reload': refresh().then(() => toast('最新にしました')); break;
-    case 'done': {
+    case 'done': {   // 取り出す（6秒以内なら元に戻せる。Claude からは「戻して」で戻せる）
       if (!t || t.status === 'done') break;
       el.closest('.task')?.classList.add('leaving');
       if (app.sheet?.kind === 'detail') closeSheet();
       send('task.done', { taskId: id });
-      toast(`「${L.clip(t.title, 16)}」を済みにしました`, { label: '取り消す', fn: () => send('task.reopen', { taskId: id }) });
-      break;
-    }
-    case 'reopen': {
-      if (!t || t.status !== 'done') break;
-      if (app.sheet?.kind === 'detail') closeSheet();
-      send('task.reopen', { taskId: id });
-      toast('未完了に戻しました', { label: '取り消す', fn: () => send('task.done', { taskId: id }) });
-      break;
-    }
-    case 'set-due': {
-      if (!t) break;
-      const before = t.due;
-      const due = el.dataset.due;
-      closeSheet();
-      send('task.edit', { taskId: id, edits: { due } });
-      toast(due === L.jstToday() ? '今日やることにしました' : `${L.dueLabel(due, L.jstToday())}に回しました`, { label: '取り消す', fn: () => send('task.edit', { taskId: id, edits: { due: before } }) });
-      break;
-    }
-    case 'choose': {
-      if (!t) break;
-      const before = t.due;
-      send('task.edit', { taskId: id, edits: { due: L.jstToday() } });
-      toast(`「${L.clip(t.title, 16)}」を今日に入れました`, { label: '取り消す', fn: () => send('task.edit', { taskId: id, edits: { due: before } }) });
-      break;
-    }
-    case 'delete': {
-      if (!t || !twoStep(el, '本当に削除する')) break;
-      const copy = structuredClone(t);
-      send('task.delete', { taskId: id });
-      closeSheet();
-      toast('削除しました', { label: '元に戻す', fn: () => {
-        const nid = uid();
-        rememberMine(nid);
-        send('task.add', { task: { ...copy, id: nid } });
-        if (copy.status === 'done') send('task.done', { taskId: nid });
-      } });
+      toast(`「${L.clip(t.title, 16)}」を取り出しました`, { label: '元に戻す', fn: () => send('task.reopen', { taskId: id }) });
       break;
     }
     case 'copy-template': {

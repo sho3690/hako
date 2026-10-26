@@ -3,7 +3,7 @@
   "short_name": "箱",
   "description": "やること・頼まれごと・思いついたことを、全部ひとつに集める箱",
   "lang": "ja",
-  "start_url": "./#/today",
+  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#f8f9fa",
