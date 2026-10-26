@@ -1,0 +1,7 @@
+{
+  "v": 1,
+  "salt": "0JMl1e2-rjIpc2uMKJxZ8g",
+  "iterations": 210000,
+  "check": "b22bf831fe563564",
+  "relay": "https://ntfy.sh"
+}
