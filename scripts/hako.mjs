@@ -77,11 +77,17 @@ async function current({ cfg, keys }) {
       try { const ev = await open(keys, m.message); if (typeof ev?.id === 'string') { ev.time = m.time; evs.push(ev); } } catch { /* 読めないものは飛ばす */ }
     }
   } catch { /* 中継に届かなければ保存済みだけで見る */ }
+  // 自分が送ったばかりのもの（中継の読み出しに出てくるまで少しかかる）も入れて見る
+  const seen = new Set(evs.map(e => e.id));
+  for (const s of await loadSent()) {
+    if (seen.has(s.id)) continue;
+    try { const ev = await open(keys, s.body); if (typeof ev?.id === 'string') evs.push(ev); } catch { /* 飛ばす */ }
+  }
   evs.sort(L.byTime);
   // 保存済みに入ったもの（項目待ちで預かっているものも含む）
   const applied = new Set([...state.log.applied, ...(state.log.pending || []).map(p => p.id)]);
   for (const ev of evs) { try { L.applyEvent(state, ev); } catch { /* 飛ばす */ } }
-  return { state, applied, relayIds: new Set(evs.map(e => e.id)) };
+  return { state, applied, relayIds: seen };
 }
 
 // ---- 送る（届かなかったものは次に使ったときに送り直す）----
