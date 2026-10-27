@@ -1,5 +1,5 @@
 // オフラインでも開けるように、画面のファイルを控えておく（常にネットを優先）。
-const CACHE = 'hako-v2';
+const CACHE = 'hako-v3';
 const SHELL = ['./', './index.html', './style.css', './app.js', './logic.js', './crypto.js', './relay.js', './config.json', './manifest.webmanifest', './icons/icon.svg'];
 
 self.addEventListener('install', e => {

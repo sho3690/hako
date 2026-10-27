@@ -15,6 +15,7 @@
 | このMacの Claude Code（どのフォルダ・どの会話でも） | 「〇〇を『箱』に入れておいて」。何をどう書くか・メモは Claude が会話から決める（スキル `~/.claude/skills/hako`） |
 | スマホ・PC の画面 | 上の欄に書いて Enter（または「入れる」）。改行で区切ればまとめて入る。URL はリンクとして付く |
 | スマホの Claude アプリ・claude.ai | Claude に「箱に入れるリンクを作って」→ 出てきたリンクを押すと、箱の画面で入れる前の確認が開く |
+| ChatGPT の dots など、自分のブラウザを持つ AI（**Mac がオフラインでも**） | 「入れるだけのリンク」を渡しておく → AI がそのリンクを開いて書き、「箱に入れる」を押す（下の節） |
 | Android の「共有」 | 共有先に「箱」を選ぶ（ホーム画面に追加したとき） |
 
 追加用リンクの形: `https://sho3690.github.io/hako/#/add?t=<やること>&n=<メモ>`（URL エンコード。複数は改行 `%0A` で区切る）。
@@ -25,6 +26,22 @@
 `claude-ai/hako-link/` が claude.ai 用のスキルです（リンクを作るだけで、どこにも書き込みません）。
 claude.ai の「設定 → 機能（Capabilities）→ スキル」で `claude-ai/hako-link.zip`（`cd claude-ai && zip -r hako-link.zip hako-link` で作れます）をアップロードすると、
 スマホの Claude アプリでも「〇〇を『箱』に入れておいて」で追加用リンクが返ってきます。
+
+### Mac を通さずに入れる（入れるだけのリンク・ChatGPT の dots など）
+
+`drop.html#w=…` は、合言葉なしで**入れることだけ**ができるページです（箱の中は見えません）。Mac を使わないので、Mac が閉じていても動きます。
+画面の「設定 → Mac を通さずに入れる」の「ChatGPT に渡す文をコピー」を押し、dots にそのまま貼り付けて覚えてもらいます。
+
+- しくみ: ページは `drop.json` の**公開鍵**で封をして（ECDH P-256 → HKDF → AES-GCM）、受け口（ntfy.sh の別の宛先）に置きます。
+  開ける秘密鍵と受け口の宛先は `drop.json` の中で合言葉の封をしてあり、箱の鍵を持つ側（画面・同期・このMacの道具）だけが開けます。
+  リンクを知っている人は入れられますが、箱の中も、他の人がこのリンクで入れたものも読めません。入れる以外（直す・取り出す・消す）はできません。
+- 同じ中身を1時間以内に二度送っても、箱には1つだけ入ります（AI の押し直し対策）。届いたものには「ChatGPT」など、どこから入ったかが付きます。
+- **リンクが知らない人に渡ったとき**（作り直すと古いリンクは使えなくなり、古いリンクで開くと「使えなくなっています」と出ます）:
+  ```
+  node scripts/drop-setup.mjs --rotate
+  git add drop.json && git commit -m "入れるだけのリンクを作り直す" && git push
+  ```
+  そのあと画面の設定から新しい文をコピーして、dots に渡し直します。
 
 ### このMacの Claude Code から使う道具
 
@@ -53,10 +70,10 @@ node ~/hako/scripts/hako.mjs reopen … / delete …
 ## しくみ
 
 ```
-[Claude Code（このMac） / スマホ・PC のブラウザ]
-   │ 入れる・取り出す・直す（合言葉の鍵で暗号化してから送る）
-   ▼
-[中継 ntfy.sh]  ← 登録不要。暗号文だけを約12時間あずかる。他の端末の画面にもすぐ届く
+[Claude Code（このMac） / スマホ・PC のブラウザ]        [ChatGPT の dots など（drop.html）]
+   │ 入れる・取り出す・直す（合言葉の鍵で暗号化して送る）    │ 入れるだけ（公開鍵で暗号化して送る）
+   ▼                                                          ▼
+[中継 ntfy.sh]  ← 登録不要。暗号文だけを約12時間あずかる。他の端末の画面にもすぐ届く（入れるだけのリンクは別の宛先）
    │ 15分ごとに取り込む
    ▼
 [GitHub Actions  scripts/sync.mjs]  → 暗号化して data/state.json に保存 → GitHub Pages で配信
@@ -83,9 +100,9 @@ node ~/hako/scripts/hako.mjs reopen … / delete …
 ## 合言葉を変える（開くためのリンクが広まりすぎたとき）
 
 ```
-node scripts/setup.mjs --keep-state       # データはそのまま、新しい合言葉で封し直す
+node scripts/setup.mjs --keep-state       # データはそのまま、新しい合言葉で封し直す（入れるだけのリンクもそのまま使える）
 gh secret set HAKO_KEY -R sho3690/hako < .secrets/master.b64
-git add config.json data/state.json && git commit -m "合言葉を変更" && git push
+git add config.json data/state.json drop.json && git commit -m "合言葉を変更" && git push
 ```
 
 新しい合言葉・開くためのリンクは `.secrets/owner.txt` に出ます（コミットされません）。古いリンクでは新しいデータを開けなくなります。

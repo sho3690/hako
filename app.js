@@ -1,6 +1,6 @@
 // 箱 HAKO — 画面。データは「保存済みのスナップショット」＋「中継に届いた変更」を合わせて表示する（土日 DONICHI と同じしくみ）。
 import * as L from './logic.js';
-import { keysFrom, deriveMaster, seal, open, b64u, PREFIX } from './crypto.js';
+import { keysFrom, deriveMaster, seal, open, openDrop, dropOpen, b64u, PREFIX } from './crypto.js';
 import { publish, poll, MAX_BODY } from './relay.js';
 
 const $ = (s, el = document) => el.querySelector(s);
@@ -68,7 +68,7 @@ const DEVICE = deviceLabel();
 
 // ---- アプリの状態 ----
 const app = {
-  cfg: null, keys: null, snap: null, relay: new Map(), outbox: [], sent: [], st: null,
+  cfg: null, keys: null, snap: null, relay: new Map(), outbox: [], sent: [], st: null, drop: null, dropSeen: new Set(),
   sheet: null, lastSnap: 0, relayOk: true, snapOk: true, trigger: null, es: null, pendingAdd: null, sig: '',
 };
 
@@ -221,6 +221,25 @@ async function pollRelay() {
   const msgs = await poll(app.cfg.relay, app.keys.topic, last ? Math.max(0, last - 900) : 'all');
   for (const m of msgs) await addRelayMessage(m);
   app.relayOk = true;
+  await pollDrop().catch(() => {});
+}
+// 入れるだけのリンク（Mac を通さずに ChatGPT などが入れたもの）も、保存を待たずに見せる
+async function loadDrop() {
+  if (app.drop) return;
+  try {
+    const res = await fetch('./drop.json', { cache: 'no-store' });
+    if (res.ok) app.drop = await openDrop(app.keys, await res.json());
+  } catch { /* 無ければ15分ごとの保存で届く */ }
+}
+async function pollDrop() {
+  if (!app.drop) return;
+  const dt = app.snap?.log?.dropTime || 0;
+  for (const m of await poll(app.cfg.relay, app.drop.topic, dt ? Math.max(0, dt - 900) : 'all')) {
+    if (app.dropSeen.has(m.id)) continue;
+    app.dropSeen.add(m.id);
+    try { for (const ev of L.fromDrop(await dropOpen(app.drop.key, m.message), m.time)) if (!app.relay.has(ev.id)) app.relay.set(ev.id, ev); }
+    catch { /* 読めないものは無視 */ }
+  }
 }
 async function addRelayMessage(m) {
   try {
@@ -234,6 +253,7 @@ async function addRelayMessage(m) {
 
 async function refresh() {
   try { await fetchSnapshot(); } catch { app.snapOk = false; }
+  await loadDrop();
   try { await pollRelay(); } catch { app.relayOk = false; }
   if (!app.snap) { render(); return; }
   // 保存済みに入った変更は中継の控えから外す
@@ -435,7 +455,7 @@ function loadingView() {
 function taskRow(t) {
   const meta = [];
   if (t.url && !t.title.includes(L.shortUrl(t.url))) meta.push(h('span', {}, icon('link'), L.shortUrl(t.url)));
-  if (t.from?.via === 'claude' || t.from?.via === 'link') meta.push(h('span', { class: 'via' }, t.from.via === 'claude' && icon('spark'), L.sourceLabel(t.from)));
+  if (['claude', 'link', 'drop'].includes(t.from?.via)) meta.push(h('span', { class: 'via' }, t.from.via === 'claude' && icon('spark'), L.sourceLabel(t.from)));
   return h('li', { class: 'task' },
     h('button', { class: 'check', type: 'button', 'aria-label': `「${t.title}」を取り出す`, 'data-action': 'done', 'data-id': t.id, 'data-key': `c-${t.id}` }, h('span', { class: 'box' }, icon('check'))),
     h('button', { class: 'task-main', type: 'button', 'data-action': 'open', 'data-id': t.id, 'data-key': `o-${t.id}` },
@@ -558,7 +578,8 @@ function sheetSettings() {
       h('p', { class: 'mt' }, '「箱に何がある？」「〇〇は済んだから出して」も伝わります。'),
       h('p', {}, 'スマホの Claude や claude.ai からは、Claude に「箱に入れるリンクを作って」と頼んでください。リンクを押すと、この画面で入れる前の確認が開きます（リンクの形）:'),
       h('code', { class: 'code-line' }, `${template}入れるもの&n=メモ`),
-      h('div', { class: 'actions-row' }, h('button', { class: 'btn btn-secondary btn-sm', type: 'button', 'data-action': 'copy-template', 'data-text': template }, icon('copy'), 'リンクの形をコピー'))),
+      h('div', { class: 'actions-row' }, h('button', { class: 'btn btn-secondary btn-sm', type: 'button', 'data-action': 'copy', 'data-text': template, 'data-done': 'リンクの形をコピーしました' }, icon('copy'), 'リンクの形をコピー'))),
+    dropSettings(),
     h('section', { class: 'settings-group' }, h('h3', {}, '別の端末で開く'),
       h('p', {}, '合言葉を入れると、合言葉なしで開けるリンクを作ります。自分のスマホなどにだけ送ってください（AirDrop など）。'),
       deviceLinkForm()),
@@ -569,6 +590,32 @@ function sheetSettings() {
     h('section', { class: 'settings-group' }, h('h3', {}, 'この端末'),
       h('p', {}, 'この端末から鍵を消します。もう一度使うときは合言葉か、開くためのリンクが必要です。'),
       h('div', { class: 'actions-row' }, h('button', { class: 'btn btn-danger btn-sm', type: 'button', 'data-action': 'logout' }, 'この端末から外す'))))];
+}
+
+// 入れるだけのリンク: 合言葉なしで入れることだけができる（中は見えない）。Mac がオフラインでも ChatGPT の dots などから入れられる
+function dropSettings() {
+  const head = h('h3', {}, 'Mac を通さずに入れる（ChatGPT など）');
+  if (!app.drop) return h('section', { class: 'settings-group' }, head, h('p', {}, '準備中です。少したってから開き直してください。'));
+  const link = `${new URL('drop.html', location.href).href.split('#')[0]}#w=${app.drop.topic}`;
+  const forAi = [
+    '「箱」（箱 HAKO）は、私のやることを何でも入れておく場所です。',
+    '私が「〇〇を箱に入れておいて」「箱に入れて」と頼んだら、私の Mac は使わずに（Mac がオフラインでも）、あなたのブラウザで次の手順で入れてください。',
+    '',
+    `1. このリンクを開く: ${link}&by=ChatGPT`,
+    '2. 「入れるもの」の欄に、1行に1つずつ書く。あとで見て分かる短い文にし、期限や日付は文の中に書く（例: 企画書を出す（金曜まで））。補足があれば「メモ」の欄へ。',
+    '3. 「箱に入れる」ボタンを押す。「箱に入れました」と出たら完了。私には「『箱』に入れました：〇〇」とだけ伝える。',
+    '',
+    '・リンクの末尾に &t=入れるもの&n=メモ を付けて開くと、欄が埋まった状態で開きます（URL エンコードする。複数は %0A で改行）。',
+    '・パスワードや鍵などの秘密は入れない。',
+    '・このリンクでできるのは入れることだけです（箱の中は見えません）。リンクは他の人や他のサービスに教えない。',
+  ].join('\n');
+  return h('section', { class: 'settings-group' }, head,
+    h('p', {}, '合言葉なしで「入れることだけ」ができるリンクです。このリンクからは箱の中は見えません。Mac がオフラインでも動きます。'),
+    h('p', {}, 'ChatGPT の dots のように自分のブラウザを持つ AI には、下のボタンで説明文をコピーして、そのまま貼り付けて覚えてもらってください。'),
+    h('div', { class: 'actions-row' },
+      h('button', { class: 'btn btn-secondary btn-sm', type: 'button', 'data-action': 'copy', 'data-text': forAi, 'data-done': 'ChatGPT に渡す文をコピーしました' }, icon('copy'), 'ChatGPT に渡す文をコピー'),
+      h('button', { class: 'btn btn-tertiary btn-sm', type: 'button', 'data-action': 'copy', 'data-text': link, 'data-done': 'リンクをコピーしました' }, icon('link'), 'リンクだけコピー')),
+    h('p', { class: 'help mt' }, 'リンクが知らない人に渡ってしまったときは、Mac の Claude に「箱の入れるだけのリンクを作り直して」と頼んでください（古いリンクは使えなくなります）。'));
 }
 
 // 開くためのリンクを作る（合言葉から親鍵を作り直す。親鍵は端末に保存しない）
@@ -630,9 +677,16 @@ function onAction(e) {
       toast(`「${L.clip(t.title, 16)}」を取り出しました`, { label: '元に戻す', fn: () => send('task.reopen', { taskId: id }) });
       break;
     }
-    case 'copy-template': {
-      const text = el.dataset.text;
-      navigator.clipboard?.writeText(text).then(() => toast('リンクの形をコピーしました'), () => toast('コピーできませんでした。上の文字を長押ししてコピーしてください'));
+    case 'copy': {   // コピーできない環境では、その場に文字を出して選んでおく
+      const text = el.dataset.text, row = el.closest('.actions-row');
+      const fallback = () => {
+        let box = row.nextElementSibling?.classList.contains('copy-box') ? row.nextElementSibling : null;
+        if (!box) { box = h('textarea', { class: 'textarea copy-box', readonly: true, 'aria-label': 'コピーする文字' }); row.after(box); }
+        box.value = text; box.focus(); box.select();
+        toast('コピーできませんでした。出てきた文字を選んでコピーしてください');
+      };
+      if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(() => toast(el.dataset.done || 'コピーしました'), fallback);
+      else fallback();
       break;
     }
     case 'logout': {

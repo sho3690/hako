@@ -294,3 +294,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
   .sheet-head { padding-left: 1rem; }
   .sheet-foot { padding-inline: 1rem; }
 }
+
+/* ---- 入れるだけのページ（drop.html）---- */
+.drop-result, .drop-problem { margin-top: 1rem; padding: 1.25rem 1.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-xl); }
+.drop-result { background: var(--success-muted); border-color: var(--success); }
+.drop-done { font-size: 1rem; font-weight: 800; color: var(--success); }
+.drop-result ul { margin: .5rem 0 .75rem; padding-left: 1.25rem; list-style: disc; font-size: .9375rem; line-height: 1.7; color: var(--text); }
+.drop-result .help { color: var(--text-2); }
+.drop-problem h2 { font-size: 1.125rem; font-weight: 800; }
+.drop-problem p { margin-top: .5rem; font-size: .9375rem; line-height: 1.7; color: var(--text-2); }
+.drop-problem .btn { margin-top: 1rem; }
+.copy-box { width: 100%; min-height: 160px; margin-top: .75rem; font-size: .8125rem; }

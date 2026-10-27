@@ -13,7 +13,7 @@ import { readFile, writeFile, readdir, rename, unlink, mkdir } from 'node:fs/pro
 import { basename } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { keysFrom, seal, open, b64u } from '../crypto.js';
+import { keysFrom, seal, open, openDrop, dropOpen, b64u } from '../crypto.js';
 import { publish, poll, MAX_BODY } from '../relay.js';
 import * as L from '../logic.js';
 
@@ -70,6 +70,15 @@ async function fetchState(keys) {
   try { return await readSealedState(keys, await readFile(new URL('data/state.json', ROOT), 'utf8')); } catch { return null; }
 }
 
+// 入れるだけのリンクの受け口（手元の drop.json → 公開ページの順）。無ければ null
+async function loadDropInfo(keys) {
+  const gets = [() => readFile(new URL('drop.json', ROOT), 'utf8'), () => fetch(`${SITE}drop.json?t=${Date.now()}`, { cache: 'no-store', signal: AbortSignal.timeout(10000) }).then(r => (r.ok ? r.text() : null))];
+  for (const get of gets) {
+    try { const text = await get(); if (text) return await openDrop(keys, JSON.parse(text)); } catch { /* 次を試す */ }
+  }
+  return null;
+}
+
 // 保存済み＋中継に届いている変更を合わせた「いまの箱」
 async function current({ cfg, keys }) {
   const state = await fetchState(keys);
@@ -81,6 +90,16 @@ async function current({ cfg, keys }) {
       try { const ev = await open(keys, m.message); if (typeof ev?.id === 'string') { ev.time = m.time; evs.push(ev); } } catch { /* 読めないものは飛ばす */ }
     }
   } catch { /* 中継に届かなければ保存済みだけで見る */ }
+  // 入れるだけのリンク（ChatGPT などが Mac を通さずに入れたもの）でまだ保存に入っていないもの
+  try {
+    const drop = await loadDropInfo(keys);
+    const dt = state.log.dropTime;
+    if (drop) {
+      for (const m of await poll(cfg.relay, drop.topic, dt ? Math.max(0, dt - 900) : 'all')) {
+        try { evs.push(...L.fromDrop(await dropOpen(drop.key, m.message), m.time)); } catch { /* 読めないものは飛ばす */ }
+      }
+    }
+  } catch { /* 届かなければ保存済みだけで見る */ }
   // 自分が送ったばかりのもの（中継の読み出しに出てくるまで少しかかる）も入れて見る
   const seen = new Set(evs.map(e => e.id));
   for (const s of await loadSent()) {

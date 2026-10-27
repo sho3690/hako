@@ -41,13 +41,13 @@ export function parseInput(text) {
 }
 
 // ---- データ ----
-export const VIAS = ['app', 'claude', 'link', 'share'];
+export const VIAS = ['app', 'claude', 'link', 'share', 'drop'];
 const DAY_MS = 86400000;
 const MAX_APPLIED = 1500, MAX_PENDING = 300, MAX_GONE = 1000;
 const FIELDS = ['title', 'note', 'url', 'status'];
 
 export function emptyState() {
-  return { v: 1, tasks: {}, log: { lastTime: 0, applied: [], pending: [], gone: [] }, updatedAt: 0, syncedAt: 0 };
+  return { v: 1, tasks: {}, log: { lastTime: 0, dropTime: 0, applied: [], pending: [], gone: [] }, updatedAt: 0, syncedAt: 0 };
 }
 
 function sanitizeFrom(f) {
@@ -144,6 +144,19 @@ export function applyEvent(state, ev) {
   touch();
   return true;
 }
+// 入れるだけのリンク（drop.html）から届いたもの → 追加のイベント。入れることしかできない（直す・取り出す・消すは作らない）。
+// 時刻は中継が受け取った時刻を使う（送り手の言う時刻は信じない）。同じものが二度届いても、同じ番号なので二重に入らない。
+export const DROP_MAX_ITEMS = 20;
+export function fromDrop(d, timeSec) {
+  if (!d || typeof d !== 'object' || !safeId(d.id) || d.id.length > 40 || !Array.isArray(d.items)) return [];
+  const at = Number(timeSec) > 0 ? Number(timeSec) * 1000 : Date.now();
+  return d.items.slice(0, DROP_MAX_ITEMS).map((x, i) => {
+    const p = typeof x === 'string' ? parseLine(x) : x && typeof x === 'object' ? x : {};
+    const id = `${d.id.slice(0, 4)}${i.toString(36)}${d.id.slice(4)}`;   // 頭の5文字で見分けがつくように（Mac の道具は頭だけを番号として出す）
+    return { id: `drop-${id}`, t: 'task.add', at, task: { id, title: p.title, url: p.url, note: d.note, from: { via: 'drop', where: d.by } } };
+  });
+}
+
 // 届いた変更を当てる順番: 変更した時刻 → 中継に届いた時刻
 export const byTime = (a, b) => ((Number(a.at) || 0) - (Number(b.at) || 0)) || ((Number(a.time) || 0) - (Number(b.time) || 0));
 
@@ -166,6 +179,7 @@ export function sourceLabel(from) {
   if (!from) return '';
   if (from.via === 'claude') return from.where ? `Claude · ${from.where}` : 'Claude';
   if (from.via === 'link') return 'リンクから';
+  if (from.via === 'drop') return from.where || 'リンクから';
   if (from.via === 'share') return '共有から';
   return from.device || '';
 }

@@ -13,8 +13,9 @@ const ITER = 210000;
 const keep = process.argv.includes('--keep-state');
 
 let state = emptyState();
+let oldKeys = null;
 if (keep) {
-  const oldKeys = await keysFrom(b64u.dec((await readFile(new URL('.secrets/master.b64', ROOT), 'utf8')).trim()));
+  oldKeys = await keysFrom(b64u.dec((await readFile(new URL('.secrets/master.b64', ROOT), 'utf8')).trim()));
   const file = JSON.parse(await readFile(new URL('data/state.json', ROOT), 'utf8'));
   state = await open(oldKeys, file.sealed);
   state.log.lastTime = 0; state.log.applied = [];   // 新しい宛先の中継は空から始まる
@@ -29,6 +30,12 @@ await mkdir(new URL('.secrets/', ROOT), { recursive: true });
 await mkdir(new URL('data/', ROOT), { recursive: true });
 await writeFile(new URL('config.json', ROOT), JSON.stringify({ v: 1, salt, iterations: ITER, check: keys.check, relay: 'https://ntfy.sh' }, null, 2) + '\n');
 await writeFile(new URL('data/state.json', ROOT), JSON.stringify({ v: 1, sealed: await seal(keys, state) }) + '\n');
+// 入れるだけのリンク（drop.json）も新しい鍵で封をし直す（リンクはそのまま使える）
+const dropText = keep ? await readFile(new URL('drop.json', ROOT), 'utf8').catch(() => null) : null;
+if (dropText) {
+  const d = JSON.parse(dropText);
+  await writeFile(new URL('drop.json', ROOT), JSON.stringify({ v: 1, pub: d.pub, tag: d.tag, sealed: await seal(keys, await open(oldKeys, d.sealed)) }, null, 1) + '\n');
+}
 await writeFile(new URL('.secrets/master.b64', ROOT), b64u.enc(master) + '\n', { mode: 0o600 });
 await writeFile(new URL('.secrets/owner.txt', ROOT), [
   '箱 HAKO の合言葉と、この端末で開くリンク（他の人に見せない）',

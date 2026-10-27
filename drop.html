@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://ntfy.sh; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f8f9fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121417" media="(prefers-color-scheme: dark)">
+<title>箱に入れる — 箱 HAKO</title>
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script type="module" src="drop.js"></script>
+</head>
+<body>
+<main class="lock">
+  <div class="lock-card">
+    <div class="brand"><span class="brand-ja">箱</span><span class="brand-en">HAKO</span></div>
+    <h1>箱に入れる</h1>
+    <p class="lead">ここに書いて「箱に入れる」を押すと、箱に届きます。このページからは、箱の中は見えません。</p>
+
+    <form id="drop-form" novalidate hidden>
+      <div class="field">
+        <label for="t">入れるもの</label>
+        <textarea class="textarea" id="t" name="t" rows="3" maxlength="4000" aria-describedby="t-help t-err"></textarea>
+        <p class="help" id="t-help">1行に1つ。期限や日付は文の中に書いてください（例: 企画書を出す（金曜まで））。</p>
+        <p class="err" id="t-err" hidden></p>
+      </div>
+      <div class="field">
+        <label for="n">メモ<span class="opt">任意</span></label>
+        <textarea class="textarea" id="n" name="n" rows="2" maxlength="1500"></textarea>
+      </div>
+      <button class="btn btn-primary btn-block" type="submit" id="go">箱に入れる</button>
+    </form>
+
+    <div id="result" class="drop-result" role="status" aria-live="polite" hidden></div>
+    <div id="problem" class="drop-problem" role="alert" hidden></div>
+
+    <p class="note">このページを開くリンクは、箱の持ち主が渡したものです。リンクを知っている人は箱に入れられますが、中を見ることはできません。</p>
+  </div>
+</main>
+</body>
+</html>

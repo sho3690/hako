@@ -78,3 +78,51 @@ export async function open(keys, sealed) {
   const plain = await subtle.decrypt({ name: 'AES-GCM', iv: raw.subarray(0, 12) }, keys.aes, raw.subarray(12));
   return JSON.parse(td.decode(await pipe(new Uint8Array(plain), new DecompressionStream('deflate-raw'))));
 }
+
+// ---- 入れるだけのリンク（drop.html）----
+// 合言葉を持たない相手（ChatGPT の dots など）が、Mac を通さずに入れるための封。公開鍵で封をする（ECDH P-256 → HKDF → AES-GCM）。
+// リンクを持つ人は入れられるが、箱の中も、他の人がこのリンクで入れたものも読めない。開ける秘密鍵は drop.json の中で、合言葉の封をしてある。
+export const DROP_PREFIX = 'hd1.';
+const EC = { name: 'ECDH', namedCurve: 'P-256' };
+const DROP_INFO = te.encode('hako/drop/v1');
+
+export async function dropKeyPair() {
+  const k = await subtle.generateKey(EC, true, ['deriveBits']);
+  return { pub: await subtle.exportKey('jwk', k.publicKey), priv: await subtle.exportKey('jwk', k.privateKey) };
+}
+async function dropAes(shared, epk, usage) {
+  const base = await subtle.importKey('raw', shared, 'HKDF', false, ['deriveKey']);
+  return subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt: epk, info: DROP_INFO }, base, { name: 'AES-GCM', length: 256 }, false, [usage]);
+}
+export async function dropSeal(pubJwk, obj) {
+  const pub = await subtle.importKey('jwk', pubJwk, EC, false, []);
+  const eph = await subtle.generateKey(EC, true, ['deriveBits']);
+  const epk = new Uint8Array(await subtle.exportKey('raw', eph.publicKey));
+  const aes = await dropAes(await subtle.deriveBits({ name: 'ECDH', public: pub }, eph.privateKey, 256), epk, 'encrypt');
+  const iv = randomBytes(12);
+  const ct = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv }, aes, await pipe(te.encode(JSON.stringify(obj)), new CompressionStream('deflate-raw'))));
+  const out = new Uint8Array(epk.length + iv.length + ct.length);
+  out.set(epk); out.set(iv, epk.length); out.set(ct, epk.length + iv.length);
+  return DROP_PREFIX + b64u.enc(out);
+}
+export async function dropOpen(privKey, sealed) {
+  if (typeof sealed !== 'string' || !sealed.startsWith(DROP_PREFIX)) throw new Error('not a drop');
+  const raw = b64u.dec(sealed.slice(DROP_PREFIX.length));
+  if (raw.length < 65 + 12 + 16) throw new Error('too short');
+  const epk = raw.slice(0, 65);
+  const pub = await subtle.importKey('raw', epk, EC, false, []);
+  const aes = await dropAes(await subtle.deriveBits({ name: 'ECDH', public: pub }, privKey, 256), epk, 'decrypt');
+  const plain = await subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(65, 77) }, aes, raw.slice(77));
+  return JSON.parse(td.decode(await pipe(new Uint8Array(plain), new DecompressionStream('deflate-raw'))));
+}
+// 宛先の照合用の印（drop.json に公開で置く）。作り直す前の古いリンク・途中で切れたリンクを、送る前に見分ける
+export async function dropTag(topic) {
+  return b64u.enc(new Uint8Array(await subtle.digest('SHA-256', te.encode(`hako/drop-tag/v1:${topic}`)))).slice(0, 22);
+}
+// drop.json（{ pub, tag, sealed }）を、箱の鍵を持つ側（画面・同期・このMac）が開く → { topic, key }
+export async function openDrop(keys, file) {
+  if (!file?.sealed) return null;
+  const s = await open(keys, file.sealed);
+  if (typeof s?.topic !== 'string' || !s.priv) return null;
+  return { topic: s.topic, key: await subtle.importKey('jwk', s.priv, EC, false, ['deriveBits']) };
+}

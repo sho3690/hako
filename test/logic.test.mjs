@@ -121,3 +121,41 @@ test('取り出して半年たったもの・届かない変更を片づける',
   assert.equal(st.log.pending.length, 0);
   assert.equal(L.maintain(st, now), false);
 });
+
+test('入れるだけのリンクから届いたものは、追加だけ・二重にならない', () => {
+  const st = L.emptyState();
+  const d = { v: 1, id: 'Zx9_drop-1', items: [{ title: ' 歯医者に電話 ' }, 'この記事を読む https://example.com/a', { title: '' }], note: 'メモ', by: 'ChatGPT' };
+  const evs = L.fromDrop(d, 1761600000);
+  assert.equal(evs.length, 3);
+  assert.ok(evs.every(e => e.t === 'task.add' && e.at === 1761600000000));
+  for (const e of evs) L.applyEvent(st, e);
+  const list = L.inBox(st);
+  assert.deepEqual(list.map(t => t.title), ['歯医者に電話', 'この記事を読む']);
+  assert.equal(list[1].url, 'https://example.com/a');
+  assert.equal(list[0].note, 'メモ');
+  assert.equal(L.sourceLabel(list[0].from), 'ChatGPT');
+  assert.equal(L.sourceLabel({ via: 'drop', where: '' }), 'リンクから');
+  // 同じものが二度届いても（送り直し・押し直し）1つのまま
+  for (const e of L.fromDrop(d, 1761600100)) L.applyEvent(st, { ...e, id: `${e.id}` });
+  assert.equal(Object.keys(st.tasks).length, 2);
+  // 消したあとに同じものが届いても戻らない
+  L.applyEvent(st, { id: 'x', t: 'task.delete', taskId: list[0].id, at: 1761600200000 });
+  st.log.applied = st.log.applied.filter(id => !id.startsWith('drop-'));
+  for (const e of L.fromDrop(d, 1761600000)) L.applyEvent(st, e);
+  assert.equal(st.tasks[list[0].id], undefined);
+  // おかしなものは入れない
+  assert.deepEqual(L.fromDrop({ id: '__proto__', items: ['x'] }, 1), []);
+  assert.deepEqual(L.fromDrop({ id: 'a'.repeat(41), items: ['x'] }, 1), []);
+  assert.deepEqual(L.fromDrop({ id: 'ok', items: 'x' }, 1), []);
+  assert.deepEqual(L.fromDrop(null, 1), []);
+  assert.equal(L.fromDrop({ id: 'many', items: Array(50).fill('x') }, 1).length, L.DROP_MAX_ITEMS);
+  const evil = L.fromDrop({ id: 'ev', items: [{ title: 'y', url: 'javascript:alert(1)' }], by: 'x'.repeat(500) }, 1);
+  L.applyEvent(st, evil[0]);
+  const e0 = st.tasks[evil[0].task.id];
+  assert.equal(e0.url, '');
+  assert.ok(e0.from.where.length <= 60);
+  assert.equal(e0.from.via, 'drop');
+  // 同じ便で届いたものは、番号の頭5文字で見分けがつく
+  const ids = L.fromDrop({ id: 'CTOFZC3YYNkkS1-yYiloy', items: ['a', 'b', 'c'] }, 1).map(e => e.task.id.slice(0, 5));
+  assert.equal(new Set(ids).size, 3);
+});
