@@ -18,8 +18,8 @@
 <main class="lock">
   <div class="lock-card">
     <div class="brand"><span class="brand-ja">箱</span><span class="brand-en">HAKO</span></div>
-    <h1>箱に入れる</h1>
-    <p class="lead">ここに書いて「箱に入れる」を押すと、箱に届きます。このページからは、箱の中は見えません。</p>
+    <h1 id="h">箱に入れる</h1>
+    <p class="lead" id="lead">ここに書いて「箱に入れる」を押すと、箱に届きます。このページからは、箱の中は見えません。</p>
 
     <form id="drop-form" novalidate hidden>
       <div class="field">
@@ -38,7 +38,13 @@
     <div id="result" class="drop-result" role="status" aria-live="polite" hidden></div>
     <div id="problem" class="drop-problem" role="alert" hidden></div>
 
-    <p class="note">このページを開くリンクは、箱の持ち主が渡したものです。リンクを知っている人は箱に入れられますが、中を見ることはできません。</p>
+    <section id="view" class="drop-view" aria-labelledby="view-h" hidden>
+      <h2 id="view-h">箱の中</h2>
+      <p class="help" id="view-at"></p>
+      <ol id="view-list" class="view-list"></ol>
+    </section>
+
+    <p class="note" id="foot">このページを開くリンクは、箱の持ち主が渡したものです。リンクを知っている人は箱に入れられますが、中を見ることはできません。</p>
   </div>
 </main>
 </body>

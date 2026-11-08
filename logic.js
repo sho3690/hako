@@ -183,3 +183,14 @@ export function sourceLabel(from) {
   if (from.via === 'share') return '共有から';
   return from.device || '';
 }
+
+// ---- 見るためのリンクに渡す写し（data/view.json の中身）----
+// 箱の中（取り出していないもの）だけ。番号・記録・取り出したものは入れない。
+export const VIEW_MAX = 300;
+export function viewSnapshot(state, now = Date.now()) {
+  return {
+    v: 1,
+    at: state.syncedAt || now,
+    items: inBox(state).slice(0, VIEW_MAX).map(t => ({ title: t.title, note: t.note || '', url: t.url || '', from: sourceLabel(t.from), addedAt: t.addedAt })),
+  };
+}

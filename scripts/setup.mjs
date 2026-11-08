@@ -30,11 +30,11 @@ await mkdir(new URL('.secrets/', ROOT), { recursive: true });
 await mkdir(new URL('data/', ROOT), { recursive: true });
 await writeFile(new URL('config.json', ROOT), JSON.stringify({ v: 1, salt, iterations: ITER, check: keys.check, relay: 'https://ntfy.sh' }, null, 2) + '\n');
 await writeFile(new URL('data/state.json', ROOT), JSON.stringify({ v: 1, sealed: await seal(keys, state) }) + '\n');
-// 入れるだけのリンク（drop.json）も新しい鍵で封をし直す（リンクはそのまま使える）
+// 入れる・見るリンク（drop.json）も新しい鍵で封をし直す（リンクはそのまま使える）
 const dropText = keep ? await readFile(new URL('drop.json', ROOT), 'utf8').catch(() => null) : null;
 if (dropText) {
   const d = JSON.parse(dropText);
-  await writeFile(new URL('drop.json', ROOT), JSON.stringify({ v: 1, pub: d.pub, tag: d.tag, sealed: await seal(keys, await open(oldKeys, d.sealed)) }, null, 1) + '\n');
+  await writeFile(new URL('drop.json', ROOT), JSON.stringify({ ...d, sealed: await seal(keys, await open(oldKeys, d.sealed)) }, null, 1) + '\n');
 }
 await writeFile(new URL('.secrets/master.b64', ROOT), b64u.enc(master) + '\n', { mode: 0o600 });
 await writeFile(new URL('.secrets/owner.txt', ROOT), [

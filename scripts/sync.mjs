@@ -1,13 +1,14 @@
 // GitHub Actions から15分ごとに実行する。
 // 1) 中継に届いた追加・変更を取り込む 2) 入れるだけのリンクから届いたものを取り込む
 // 3) 済んでから半年たったものを片づける 4) 暗号化して data/state.json に保存
+// 5) 見るためのリンク用に、箱の中の写しを別の鍵で封をして data/view.json に保存
 // 公開リポジトリのログは誰でも読めるので、件数以外（題名・メモ・エラー文）は出力しない。
 
 import { appendFile } from 'node:fs/promises';
 import { poll } from '../relay.js';
 import { open, dropOpen } from '../crypto.js';
 import { applyEvent, maintain, byTime, fromDrop } from '../logic.js';
-import { loadKeys, loadState, saveState, loadDrop } from './state-io.mjs';
+import { loadKeys, loadState, saveState, loadDrop, saveView } from './state-io.mjs';
 
 const log = [];
 const say = s => { log.push(s); console.log(s); };
@@ -63,6 +64,11 @@ async function main() {
     await saveState(keys, state);
     say('保存しました');
   } else say('変更なし');
+
+  if (drop?.view) {
+    try { if (await saveView(drop.view, state)) say('見るための写しを更新しました'); }
+    catch (e) { say(`見るための写しを作れませんでした: ${e?.name || 'Error'}`); }
+  }
 }
 
 try { await main(); }

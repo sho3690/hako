@@ -1,10 +1,11 @@
 // Actions 用: 鍵の確認と、暗号化した data/state.json の読み書き。
 import { readFile, writeFile } from 'node:fs/promises';
-import { keysFrom, seal, open, openDrop, b64u } from '../crypto.js';
-import { emptyState } from '../logic.js';
+import { keysFrom, seal, open, openDrop, b64u, viewSeal, viewOpen, viewTag } from '../crypto.js';
+import { emptyState, viewSnapshot } from '../logic.js';
 
 export const ROOT = new URL('..', import.meta.url);
 const STATE = new URL('data/state.json', ROOT);
+const VIEW = new URL('data/view.json', ROOT);
 export const fail = s => { console.log(`::error::${s}`); process.exit(1); };
 
 export async function loadKeys() {
@@ -26,4 +27,15 @@ export async function saveState(keys, state) {
 export async function loadDrop(keys) {
   const text = await readFile(new URL('drop.json', ROOT), 'utf8').catch(() => null);
   return text ? openDrop(keys, JSON.parse(text)) : null;
+}
+// 見るためのリンク用の写し（data/view.json）。中身が変わったとき・鍵を作り直したときだけ書く（同じなら書かない＝コミットが増えない）
+export async function saveView(view, state) {
+  const snap = viewSnapshot(state);
+  const vtag = await viewTag(view);
+  const file = JSON.parse(await readFile(VIEW, 'utf8').catch(() => '{}'));
+  if (file.vtag === vtag) {
+    try { if (JSON.stringify((await viewOpen(view, file.sealed)).items) === JSON.stringify(snap.items)) return false; } catch { /* 開けなければ書き直す */ }
+  }
+  await writeFile(VIEW, JSON.stringify({ v: 1, vtag, sealed: await viewSeal(view, snap) }) + '\n');
+  return true;
 }

@@ -159,3 +159,19 @@ test('入れるだけのリンクから届いたものは、追加だけ・二�
   const ids = L.fromDrop({ id: 'CTOFZC3YYNkkS1-yYiloy', items: ['a', 'b', 'c'] }, 1).map(e => e.task.id.slice(0, 5));
   assert.equal(new Set(ids).size, 3);
 });
+
+test('見るための写し: 箱の中だけ（取り出したもの・記録・番号は入れない）', () => {
+  const s = L.emptyState();
+  L.applyEvent(s, { id: 'e1', t: 'task.add', at: 1000, task: { id: 'a1', title: '古いもの', note: 'メモ', url: 'https://example.com/', from: { via: 'drop', where: 'ChatGPT' } } });
+  L.applyEvent(s, { id: 'e2', t: 'task.add', at: 2000, task: { id: 'b2', title: '新しいもの', from: { via: 'claude', where: 'hako' } } });
+  L.applyEvent(s, { id: 'e3', t: 'task.add', at: 3000, task: { id: 'c3', title: '済んだもの' } });
+  L.applyEvent(s, { id: 'e4', t: 'task.done', at: 4000, taskId: 'c3' });
+  s.syncedAt = 5000;
+  const v = L.viewSnapshot(s);
+  assert.equal(v.at, 5000);
+  assert.deepEqual(v.items.map(i => i.title), ['新しいもの', '古いもの']);
+  assert.deepEqual(v.items[1], { title: '古いもの', note: 'メモ', url: 'https://example.com/', from: 'ChatGPT', addedAt: 1000 });
+  assert.equal(v.items[0].from, 'Claude · hako');
+  const text = JSON.stringify(v);
+  for (const leak of ['a1', 'b2', 'c3', 'e1', 'applied', 'log']) assert.ok(!text.includes(`"${leak}"`), `${leak} は写しに入らない`);
+});

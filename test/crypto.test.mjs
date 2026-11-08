@@ -59,3 +59,26 @@ test('入れるだけのリンク: 公開鍵で封をして、箱の鍵を持つ
   await assert.rejects(dropOpen(drop.key, 'hk1.xxxx'));
   assert.notEqual(await dropTag(topic), await dropTag(topic.slice(0, -1)), '途中で切れたリンクは見分けられる');
 });
+
+test('見るための鍵: 写しだけを開けて、箱の鍵や中継の封は開けない', async () => {
+  const { newViewKey, viewSeal, viewOpen, viewTag, keysFrom: kf, deriveMaster: dm, seal: sl, b64u: b, dropKeyPair: dkp, openDrop: od } = await import('../crypto.js');
+  const keys = await kf(await dm('aaaaa', b.enc(new Uint8Array(16)), 1000));
+  const v = newViewKey();
+  assert.match(v, /^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(v, newViewKey());
+  const snap = { v: 1, at: 1, items: [{ title: '歯医者に電話📞', note: '', url: '', from: 'ChatGPT', addedAt: 1 }] };
+  const sealed = await viewSeal(v, snap);
+  assert.ok(sealed.startsWith('hv1.'));
+  assert.deepEqual(await viewOpen(v, sealed), snap);
+  await assert.rejects(viewOpen(newViewKey(), sealed), '別の見るための鍵では開かない');
+  await assert.rejects(viewOpen(v, await sl(keys, { x: 1 })), '箱の鍵の封（state・中継）は開けない');
+  await assert.rejects(viewOpen(v.slice(0, -2), sealed), '途中で切れた鍵は使えない');
+  assert.notEqual(await viewTag(v), await viewTag(newViewKey()));
+  assert.ok(!(await viewTag(v)).includes(v.slice(0, 10)), '公開する印から鍵は分からない');
+  // drop.json に入れた見るための鍵は、箱の鍵を持つ側だけが取り出せる
+  const { pub, priv } = await dkp();
+  const drop = await od(keys, { v: 1, pub, sealed: await sl(keys, { topic: 'hakodTESTtopic0123456789', priv, view: v }) });
+  assert.equal(drop.view, v);
+  const legacy = await od(keys, { v: 1, pub, sealed: await sl(keys, { topic: 'hakodTESTtopic0123456789', priv }) });
+  assert.equal(legacy.view, '', '見るための鍵が無い古い drop.json でも動く');
+});

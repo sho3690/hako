@@ -1,12 +1,40 @@
-// 箱 HAKO — 入れるだけのページ（drop.html）。合言葉なしで、箱に入れることだけができる（中は見えない）。
-// Mac がオフラインでも、ChatGPT の dots などが自分のブラウザで開いて入れられるように。
-// リンク: drop.html#w=<受け口>&by=<だれから（例: ChatGPT）>&t=<入れるもの>&n=<メモ>（t と n は省いて、開いてから書いてもよい）
-import { parseInput, clip, DROP_MAX_ITEMS } from './logic.js';
-import { dropSeal, dropTag, b64u } from './crypto.js';
+// 箱 HAKO — 入れる・見るページ（drop.html）。合言葉なしで、箱に入れることと（r があれば）箱の中を見ることだけができる。
+// 直す・取り出す・消すはできない。Mac がオフラインでも、ChatGPT の dots などが自分のブラウザで開いて使えるように。
+// リンク: drop.html#w=<受け口>&r=<見るための鍵（任意）>&by=<だれから（例: ChatGPT）>&t=<入れるもの>&n=<メモ>（t と n は省いて、開いてから書いてもよい）
+import { parseInput, clip, safeUrl, DROP_MAX_ITEMS } from './logic.js';
+import { dropSeal, dropTag, viewOpen, viewTag, b64u } from './crypto.js';
 import { publish, MAX_BODY } from './relay.js';
 
 const $ = s => document.querySelector(s);
 const form = $('#drop-form'), ta = $('#t'), note = $('#n'), go = $('#go'), err = $('#t-err'), result = $('#result'), problem = $('#problem');
+const el = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids.filter(k => k != null && k !== '')); return e; };
+const md = ms => { const d = new Date(ms); return `${d.getMonth() + 1}/${d.getDate()}`; };
+const mdhm = ms => { const d = new Date(ms); return `${md(ms)} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; };
+
+// 箱の中を見る（r があるとき）。同期が15分ごとに作る写しなので、入れたばかりのものはまだ出ないことがある
+async function showView(r) {
+  const sec = $('#view'), at = $('#view-at'), list = $('#view-list');
+  sec.hidden = false;
+  const say = text => { at.textContent = text; list.replaceChildren(); };
+  if (!/^[A-Za-z0-9_-]{43}$/.test(r)) return say('このリンクでは箱の中を見られません（リンクが途中で切れているようです）。入れることはできます。');
+  let file;
+  try { const res = await fetch('./data/view.json', { cache: 'no-store' }); if (!res.ok) throw new Error(String(res.status)); file = await res.json(); }
+  catch { return say('箱の中を読み込めませんでした。少したってから開き直してください。入れることはできます。'); }
+  if (file?.vtag !== await viewTag(r)) return say('このリンクでは箱の中を見られなくなっています（作り直されたか、写しの準備中です）。入れることはできます。');
+  let snap;
+  try { snap = await viewOpen(r, file.sealed); } catch { return say('箱の中を開けませんでした。入れることはできます。'); }
+  const items = Array.isArray(snap?.items) ? snap.items : [];
+  at.textContent = `${items.length}件 · ${mdhm(snap.at)} の時点（15分ごとに更新。いま入れたものは次の更新で出ます）`;
+  if (!items.length) { list.replaceChildren(el('li', { className: 'empty', textContent: '箱は空です' })); return; }
+  list.replaceChildren(...items.map(i => {
+    const url = safeUrl(i.url || '');
+    return el('li', {},
+      el('p', { className: 'v-title', textContent: String(i.title || '') }),
+      i.note ? el('p', { className: 'v-note', textContent: String(i.note) }) : null,
+      url ? el('p', { className: 'v-link' }, el('a', { href: url, rel: 'noopener noreferrer nofollow', target: '_blank', textContent: url })) : null,
+      el('p', { className: 'v-meta', textContent: [i.addedAt ? `${md(i.addedAt)}に入れた` : '', i.from ? String(i.from) : ''].filter(Boolean).join(' · ') }));
+  }));
+}
 
 function showProblem(title, text, retry = false) {
   form.hidden = true;
@@ -38,6 +66,15 @@ async function main() {
     [cfg, drop] = await Promise.all(['./config.json', './drop.json'].map(u => fetch(u, { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })));
   } catch { return showProblem('読み込めませんでした', '電波の良い所で、開き直してください。', true); }
   if (!drop?.pub || drop.tag !== await dropTag(w)) return showProblem('このリンクは使えなくなっています', 'リンクが作り直されたか、途中で切れています。箱の「設定」から新しい「入れるだけのリンク」をもらってください。');
+
+  const r = q.get('r');
+  if (r != null) {
+    document.title = '箱に入れる・見る — 箱 HAKO';
+    $('#h').textContent = '箱に入れる・見る';
+    $('#lead').textContent = 'ここに書いて「箱に入れる」を押すと、箱に届きます。下の「箱の中」で、いま入っているものが見られます。';
+    $('#foot').textContent = 'このページを開くリンクは、箱の持ち主が渡したものです。リンクを知っている人は、箱に入れることと中を見ることができます（直す・取り出す・消すはできません）。';
+    showView(r);
+  }
 
   ta.value = (q.get('t') || '').slice(0, 4000);
   note.value = (q.get('n') || '').slice(0, 1500);

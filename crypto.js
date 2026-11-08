@@ -63,18 +63,18 @@ async function pipe(bytes, stream) {
   return new Uint8Array(await res.arrayBuffer());
 }
 
-export async function seal(keys, obj) {
+export async function seal(keys, obj, prefix = PREFIX) {
   const plain = await pipe(te.encode(JSON.stringify(obj)), new CompressionStream('deflate-raw'));
   const iv = randomBytes(12);
   const ct = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv }, keys.aes, plain));
   const out = new Uint8Array(iv.length + ct.length);
   out.set(iv); out.set(ct, iv.length);
-  return PREFIX + b64u.enc(out);
+  return prefix + b64u.enc(out);
 }
 
-export async function open(keys, sealed) {
-  if (typeof sealed !== 'string' || !sealed.startsWith(PREFIX)) throw new Error('not sealed');
-  const raw = b64u.dec(sealed.slice(PREFIX.length));
+export async function open(keys, sealed, prefix = PREFIX) {
+  if (typeof sealed !== 'string' || !sealed.startsWith(prefix)) throw new Error('not sealed');
+  const raw = b64u.dec(sealed.slice(prefix.length));
   const plain = await subtle.decrypt({ name: 'AES-GCM', iv: raw.subarray(0, 12) }, keys.aes, raw.subarray(12));
   return JSON.parse(td.decode(await pipe(new Uint8Array(plain), new DecompressionStream('deflate-raw'))));
 }
@@ -119,10 +119,26 @@ export async function dropOpen(privKey, sealed) {
 export async function dropTag(topic) {
   return b64u.enc(new Uint8Array(await subtle.digest('SHA-256', te.encode(`hako/drop-tag/v1:${topic}`)))).slice(0, 22);
 }
-// drop.json（{ pub, tag, sealed }）を、箱の鍵を持つ側（画面・同期・このMac）が開く → { topic, key }
+// drop.json（{ pub, tag, vtag, sealed }）を、箱の鍵を持つ側（画面・同期・このMac）が開く → { topic, key, view }
 export async function openDrop(keys, file) {
   if (!file?.sealed) return null;
   const s = await open(keys, file.sealed);
   if (typeof s?.topic !== 'string' || !s.priv) return null;
-  return { topic: s.topic, key: await subtle.importKey('jwk', s.priv, EC, false, ['deriveBits']) };
+  return { topic: s.topic, key: await subtle.importKey('jwk', s.priv, EC, false, ['deriveBits']), view: typeof s.view === 'string' ? s.view : '' };
 }
+
+// ---- 見るための鍵（リンクの r=）----
+// 箱の中（取り出していないもの）の写しだけを開ける鍵。同期が data/view.json にこの鍵で封をして置く。
+// 箱の鍵とは別の、でたらめな鍵なので、これを持っていても入れる以外の変更（直す・取り出す・消す）や中継の中身は読めない。
+export const VIEW_PREFIX = 'hv1.';
+export const newViewKey = () => b64u.enc(randomBytes(32));
+export async function viewKeys(view) {
+  const raw = b64u.dec(view);
+  if (raw.length !== 32) throw new Error('bad view key');
+  return { aes: await subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']) };
+}
+export async function viewTag(view) {
+  return b64u.enc(new Uint8Array(await subtle.digest('SHA-256', te.encode(`hako/view-tag/v1:${view}`)))).slice(0, 22);
+}
+export const viewSeal = async (view, obj) => seal(await viewKeys(view), obj, VIEW_PREFIX);
+export const viewOpen = async (view, sealed) => open(await viewKeys(view), sealed, VIEW_PREFIX);
